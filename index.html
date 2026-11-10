@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>ABC Robot Explorer</title>
+<link rel="stylesheet" href="style.css">
+<script type="module" src="app.js"></script>
+</head>
+<body>
+<div id="gate" class="hidden">
+  <form id="gate-form">
+    <input id="gate-token" type="password" placeholder="hf_…" autocomplete="off" spellcheck="false">
+    <button>저장</button>
+    <p id="gate-error"></p>
+  </form>
+</div>
+<header id="top" class="hidden">
+  <a href="#/" class="brand">ABC-130k</a>
+  <nav id="splits"></nav>
+  <div class="tools">
+    <input id="search" type="search" placeholder="검색">
+    <select id="sort">
+      <option value="hours">hours</option>
+      <option value="episodes">episodes</option>
+      <option value="annotated">annotated %</option>
+      <option value="avg">min / ep</option>
+      <option value="name">name</option>
+    </select>
+    <button id="view-toggle" title="표 / 그리드"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg></button>
+    <button id="logout" title="토큰 삭제"><svg viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></svg></button>
+  </div>
+</header>
+<main id="main" class="hidden">
+  <section id="stats"></section>
+  <section id="tasks"></section>
+  <section id="task" class="hidden">
+    <div class="task-head">
+      <a id="back" href="#/">←</a>
+      <h1 id="task-title"></h1>
+      <span id="task-meta"></span>
+      <a id="task-hf" target="_blank" rel="noreferrer">HF ↗</a>
+    </div>
+    <div id="episodes" class="grid"></div>
+    <div id="sentinel"></div>
+  </section>
+  <p id="message"></p>
+</main>
+</body>
+</html>
