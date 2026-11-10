@@ -47,5 +47,32 @@
   </section>
   <p id="message"></p>
 </main>
+<dialog id="player">
+  <div class="pv-head">
+    <div class="pv-titles">
+      <h2 id="pv-title"></h2>
+      <code id="pv-id"></code>
+      <p id="pv-instruction"></p>
+    </div>
+    <div class="pv-actions">
+      <span id="pv-status"></span>
+      <button id="pv-prev" title="이전 (↑)">↑</button>
+      <button id="pv-next" title="다음 (↓)">↓</button>
+      <button id="pv-close" title="닫기 (Esc)">✕</button>
+    </div>
+  </div>
+  <div id="pv-cams"></div>
+  <div class="pv-bar">
+    <button id="pv-play">▶</button>
+    <span id="pv-time">0:00</span>
+    <div class="pv-track"><canvas id="pv-loaded" height="4"></canvas><input id="pv-seek" type="range" min="0" step="0.01" value="0"></div>
+    <span id="pv-total">0:00</span>
+    <select id="pv-speed"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option></select>
+  </div>
+  <div class="pv-charts">
+    <div><span>left</span><canvas id="pv-chart-left"></canvas></div>
+    <div><span>right</span><canvas id="pv-chart-right"></canvas></div>
+  </div>
+</dialog>
 </body>
 </html>

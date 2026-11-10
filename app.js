@@ -1,5 +1,6 @@
 import { decompress } from 'https://cdn.jsdelivr.net/npm/fzstd@0.1.1/+esm';
 import { firstFrame } from './mcap.js';
+import { createViewer } from './viewer.js';
 
 const REPO = 'XDOF/ABC-130k';
 const HF = `https://huggingface.co/datasets/${REPO}`;
@@ -23,7 +24,7 @@ let token = ls.get('hf_token');
 const auth = () => ({ Authorization: 'Bearer ' + token });
 
 // ---------- HTTP + cache ----------
-class AuthError extends Error {}
+class AuthError extends Error { name = 'AuthError'; }
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 async function hf(url, opts = {}) {
   let r;
@@ -92,9 +93,9 @@ async function report(split) {
 }
 
 const signed = new Map();
-async function sign(path) {
+async function sign(path, force = false) {
   const c = signed.get(path);
-  if (c && Date.now() - c.t < 40 * 60e3) return c;
+  if (c && !force && Date.now() - c.t < 40 * 60e3) return c;
   const r = await hf(`${HF}/resolve/main/${enc(path)}`, { headers: { Range: 'bytes=0-0' } });
   const size = +(r.headers.get('content-range') || '').split('/')[1];
   await r.arrayBuffer();
@@ -102,8 +103,8 @@ async function sign(path) {
   signed.set(path, v);
   return v;
 }
-async function range(s, a, b) {
-  const r = await fetch(s.url, { headers: { ...(s.direct ? auth() : {}), Range: `bytes=${a}-${b}` } });
+async function range(s, a, b, signal) {
+  const r = await fetch(s.url, { signal, headers: { ...(s.direct ? auth() : {}), Range: `bytes=${a}-${b}` } });
   if (r.status !== 206 && r.status !== 200) throw new Error('range ' + r.status);
   const u = new Uint8Array(await r.arrayBuffer());
   return r.status === 200 ? u.subarray(a, b + 1) : u;
@@ -328,7 +329,8 @@ function renderMoreEpisodes() {
     const el = document.createElement('button');
     el.className = 'ep';
     el.innerHTML = `<div class="cover"><img alt=""><span class="dur"></span></div><code>${esc(it.name.replace(/^episode_/, '').slice(0, 13))}</code>`;
-    el.onclick = () => openEpisode(ep);
+    const index = v.shown + next.indexOf(it);
+    el.onclick = () => openEpisodeAt(items, index);
     box.appendChild(el);
     lazyThumb(el.querySelector('.cover'), ep);
   }
@@ -336,18 +338,21 @@ function renderMoreEpisodes() {
 }
 new IntersectionObserver(es => { if (es[0].isIntersecting && episodeView) renderMoreEpisodes(); }, { rootMargin: '800px' }).observe($('sentinel'));
 
-async function openEpisode(ep) {
-  const w = window.open('', '_blank');
-  try {
-    const s = await sign(ep + '/episode.mcap');
-    const u = new URL('viewer/', location.href);
-    u.searchParams.set('ds', 'remote-file');
-    u.searchParams.set('ds.url', s.url);
-    if (w) w.location.href = u.href; else location.href = u.href;
-  } catch (e) {
-    w?.close();
-    if (e instanceof AuthError) showGate(e.message); else msg(e.message);
-  }
+const player = createViewer({
+  sign, range, decompress: d => decompress(d),
+  onAuthError: e => { $('player').close(); showGate(e.message); },
+});
+
+function openEpisodeAt(items, i) {
+  const v = episodeView, it = items[i];
+  if (!v || !it) return;
+  const ep = `data/${v.split}/${v.task}/${it.name}`;
+  player.open(ep, {
+    title: label(v.task),
+    subtitle: `${v.split} · ${it.name.replace(/^episode_/, '')} · ${i + 1} / ${items.length}`,
+    onPrev: i > 0 ? () => openEpisodeAt(items, i - 1) : null,
+    onNext: i < items.length - 1 ? () => openEpisodeAt(items, i + 1) : null,
+  });
 }
 
 // ---------- routing ----------
@@ -424,5 +429,5 @@ function start() {
   $('main').classList.remove('hidden');
   route();
 }
-window.addEventListener('hashchange', () => { $('search').value = ''; route(); });
+window.addEventListener('hashchange', () => { $('search').value = ''; if ($('player').open) $('player').close(); route(); });
 if (token) start(); else showGate();

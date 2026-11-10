@@ -34,7 +34,7 @@ export async function readSummary(fetchRange, size) {
   if (summaryStart < tailStart) { tail = await fetchRange(summaryStart, size - 1); base = summaryStart; }
   const summary = tail.subarray(summaryStart - base, tail.length - FOOTER);
   const schemas = new Map(), channels = new Map(), chunks = [];
-  let duration = 0;
+  let duration = 0, startTime = 0;
   for (const { op, body } of records(summary)) {
     const r = new Reader(body);
     if (op === 0x03) {
@@ -50,12 +50,12 @@ export async function readSummary(fetchRange, size) {
     } else if (op === 0x0b) {
       r.u64(); r.u16(); r.u32(); r.u32(); r.u32(); r.u32();
       const start = r.u64(), end = r.u64();
-      duration = (end - start) / 1e9;
+      duration = (end - start) / 1e9; startTime = start;
     }
   }
   chunks.sort((a, b) => a.start - b.start);
   for (const c of channels.values()) c.schema = schemas.get(c.schemaId)?.name || '';
-  return { channels, chunks, duration };
+  return { channels, chunks, duration, start: startTime || chunks[0]?.start || 0 };
 }
 
 export async function readChunk(fetchRange, chunk, decompress) {
@@ -135,7 +135,28 @@ export function codecString(format, data) {
   return `hev1.${space}${profile}.${rev.toString(16).toUpperCase()}.${tier ? 'H' : 'L'}${p[11]}.${cons.map(c => hex(c)).join('.')}`;
 }
 
+// Repeated double field (packed or not) as an array of numbers.
+export function protoDoubles(buf, wanted) {
+  const out = [];
+  let o = 0;
+  const v = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+  const varint = () => { let x = 0, s = 1; for (;;) { const b = buf[o++]; x += (b & 127) * s; if (b < 128) return x; s *= 128; } };
+  while (o < buf.length) {
+    const key = varint(), field = Math.floor(key / 8), wire = key & 7;
+    if (wire === 0) varint();
+    else if (wire === 2) {
+      const n = varint();
+      if (field === wanted) for (let i = 0; i + 8 <= n; i += 8) out.push(v.getFloat64(o + i, true));
+      o += n;
+    } else if (wire === 1) { if (field === wanted) out.push(v.getFloat64(o, true)); o += 8; }
+    else if (wire === 5) o += 4;
+    else break;
+  }
+  return out;
+}
+
 export function isKeyframe(format, data) {
+  if (data.length > 1024) data = data.subarray(0, 1024); // parameter sets + slice header sit at the front
   return nals(data).some(n => format === 'h264' ? (n[0] & 31) === 5 : (((n[0] >> 1) & 63) >= 16 && ((n[0] >> 1) & 63) <= 21));
 }
 
