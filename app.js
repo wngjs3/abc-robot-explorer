@@ -1,4 +1,4 @@
-import { decompress } from 'https://cdn.jsdelivr.net/npm/fzstd@0.1.1/+esm';
+import { decompress, Decompress } from 'https://cdn.jsdelivr.net/npm/fzstd@0.1.1/+esm';
 import { firstFrame } from './mcap.js';
 import { createViewer } from './viewer.js';
 
@@ -139,7 +139,7 @@ async function thumbnail(ep) {
     v = { url: URL.createObjectURL(await hit.blob()), instruction: decodeURIComponent(hit.headers.get('x-instr') || ''), duration: +hit.headers.get('x-dur') };
   } else {
     const s = await sign(ep + '/episode.mcap');
-    const f = await firstFrame((a, b) => range(s, a, b), s.size, d => decompress(d));
+    const f = await firstFrame((a, b) => range(s, a, b), s.size, d => decompress(d), Decompress);
     const blob = f.kind === 'image' ? new Blob([f.data], { type: 'image/' + (f.format || 'jpeg') }) : await decodeToJpeg(f);
     await cachePut(key, blob, blob.type, { 'x-instr': encodeURIComponent(f.instruction), 'x-dur': String(f.duration) });
     v = { url: URL.createObjectURL(blob), instruction: f.instruction, duration: f.duration };

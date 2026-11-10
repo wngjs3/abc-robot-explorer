@@ -15,6 +15,7 @@ function* records(buf) {
   let o = 0;
   while (o + 9 <= buf.length) {
     const op = buf[o], len = Number(v.getBigUint64(o + 1, true));
+    if (o + 9 + len > buf.length) return; // truncated (prefix read)
     yield { op, body: buf.subarray(o + 9, o + 9 + len) };
     o += 9 + len;
   }
@@ -23,7 +24,7 @@ function* records(buf) {
 const FOOTER = 8 + 1 + 8 + 20; // magic + footer record
 
 export async function readSummary(fetchRange, size) {
-  const tailStart = Math.max(0, size - 512 * 1024);
+  const tailStart = Math.max(0, size - 192 * 1024);
   let tail = await fetchRange(tailStart, size - 1);
   const f = new Reader(tail.subarray(tail.length - FOOTER));
   if (f.b[0] !== 0x02) throw new Error('mcap footer');
@@ -56,6 +57,37 @@ export async function readSummary(fetchRange, size) {
   chunks.sort((a, b) => a.start - b.start);
   for (const c of channels.values()) c.schema = schemas.get(c.schemaId)?.name || '';
   return { channels, chunks, duration, start: startTime || chunks[0]?.start || 0 };
+}
+
+function parseMessages(raw) {
+  const out = [];
+  for (const { op, body } of records(raw)) {
+    if (op !== 0x05) continue;
+    const m = new Reader(body);
+    out.push({ channel: m.u16(), seq: m.u32(), time: m.u64(), data: body.subarray(22) });
+  }
+  return out;
+}
+
+// Messages from the first `prefix` bytes of a chunk (streaming zstd), or the whole chunk if `enough` is not met.
+export async function readChunkPrefix(fetchRange, chunk, decompress, Stream, enough, prefix = 384 * 1024) {
+  if (Stream && chunk.length > prefix * 1.3) {
+    const buf = await fetchRange(chunk.offset, chunk.offset + prefix - 1);
+    const r = new Reader(buf.subarray(9));
+    r.u64(); r.u64(); r.u64(); r.u32();
+    const compression = r.str();
+    r.u64();
+    if (compression === 'zstd') {
+      const parts = [];
+      try { new Stream(d => parts.push(d)).push(buf.subarray(9 + r.o)); } catch { /* input ends mid-block */ }
+      const raw = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+      let o = 0;
+      for (const p of parts) { raw.set(p, o); o += p.length; }
+      const messages = parseMessages(raw);
+      if (enough(messages)) return messages;
+    }
+  }
+  return readChunk(fetchRange, chunk, decompress);
 }
 
 export async function readChunk(fetchRange, chunk, decompress) {
@@ -163,7 +195,7 @@ export function isKeyframe(format, data) {
 const CAMERA_ORDER = ['/top-left-camera', '/top-camera', '/top-right-camera', '/left-wrist-camera', '/right-wrist-camera'];
 
 // First decodable camera frame (+ first instruction) of an episode, reading only summary + first chunk.
-export async function firstFrame(fetchRange, size, decompress) {
+export async function firstFrame(fetchRange, size, decompress, Stream) {
   const meta = await readSummary(fetchRange, size);
   const cams = [...meta.channels.values()].filter(c => /Compressed(Video|Image)$/.test(c.schema));
   if (!cams.length) throw new Error('no camera');
@@ -172,7 +204,9 @@ export async function firstFrame(fetchRange, size, decompress) {
   const instr = [...meta.channels.values()].find(c => c.topic === '/instruction');
   const chunk = meta.chunks.find(c => c.ids.has(cam.id));
   if (!chunk) throw new Error('no chunk');
-  const messages = await readChunk(fetchRange, chunk, decompress);
+  const image = cam.schema.endsWith('CompressedImage');
+  const ready = msgs => msgs.some(m => m.channel === cam.id && (image || (() => { const f = protoFields(m.data); return f[3] && isKeyframe(text(f[4]).toLowerCase(), f[3]); })()));
+  const messages = await readChunkPrefix(fetchRange, chunk, decompress, Stream, ready);
   let instruction = '';
   if (instr) { const m = messages.find(x => x.channel === instr.id); if (m) instruction = text(protoFields(m.data)[2]); }
   const frames = messages.filter(m => m.channel === cam.id).map(m => protoFields(m.data));
