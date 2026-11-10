@@ -281,7 +281,8 @@ function renderTasks(data) {
     box.querySelectorAll('th[data-sort]').forEach(h => h.onclick = () => setSort(h.dataset.sort, data));
     box.querySelectorAll('tr[data-task]').forEach(tr => { tr.onclick = () => { location.hash = `#/${data.split}/${tr.dataset.task}`; }; lazyThumb(tr.querySelector('.thumb'), () => firstEpisode(data.split, tr.dataset.task)); });
   } else {
-    box.innerHTML = rows.map(t => `<a class="card" href="#/${esc(data.split)}/${esc(t.name)}"><div class="cover"><img alt=""></div><div class="info"><h3>${esc(label(t.name))}</h3><p><span data-count="${esc(t.name)}">${fmt(t.episodes)}</span> ep${t.hours == null ? '' : ` · ${t.hours.toFixed(1)} h`}${t.annotated == null || !t.episodes ? '' : ` · ${Math.round(100 * t.annotated / t.episodes)}% ann`}</p></div></a>`).join('');
+    const maxHours = Math.max(...rows.map(t => t.hours || 0), 1);
+    box.innerHTML = rows.map((t, i) => `<a class="card" href="#/${esc(data.split)}/${esc(t.name)}"><div class="cover"><img alt=""><span class="rank">${i + 1}</span><h3>${esc(label(t.name))}</h3></div><div class="info"><p><b data-count="${esc(t.name)}">${fmt(t.episodes)}</b> ep${t.hours == null ? '' : ` · <b>${t.hours.toFixed(1)}</b> h`}${avg(t) == null ? '' : ` · ${avg(t).toFixed(1)} min/ep`}${t.annotated == null || !t.episodes ? '' : ` · ${Math.round(100 * t.annotated / t.episodes)}% ann`}</p>${t.hours == null ? '' : `<i class="bar" style="--w:${(100 * t.hours / maxHours).toFixed(1)}%"></i>`}</div></a>`).join('');
     box.querySelectorAll('.card').forEach((a, i) => lazyThumb(a.querySelector('.cover'), () => firstEpisode(data.split, rows[i].name)));
   }
   msg(rows.length ? '' : '—');
