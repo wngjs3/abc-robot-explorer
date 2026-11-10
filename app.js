@@ -24,8 +24,14 @@ const auth = () => ({ Authorization: 'Bearer ' + token });
 
 // ---------- HTTP + cache ----------
 class AuthError extends Error {}
+const sleep = ms => new Promise(r => setTimeout(r, ms));
 async function hf(url, opts = {}) {
-  const r = await fetch(url, { ...opts, headers: { ...auth(), ...(opts.headers || {}) } });
+  let r;
+  for (let attempt = 0; ; attempt++) {
+    r = await fetch(url, { ...opts, headers: { ...auth(), ...(opts.headers || {}) } });
+    if (r.status !== 429 || attempt === 4) break;
+    await sleep((+r.headers.get('retry-after') || 2 ** attempt) * 1000);
+  }
   if (r.status === 401 || r.status === 403) throw new AuthError(String(r.status));
   if (!r.ok) throw new Error(`${r.status} ${url.replace(HF, '').replace(API, '')}`);
   return r;
@@ -141,15 +147,19 @@ async function thumbnail(ep) {
   return v;
 }
 
-const queue = [];
+// Parallel thumbnail loading: only cards near the viewport are queued; they start in on-screen order.
+const PARALLEL = 16;
+const pending = new Set();
 let active = 0;
 const observer = new IntersectionObserver(entries => {
-  for (const e of entries) if (e.isIntersecting) { observer.unobserve(e.target); queue.push(e.target); }
+  for (const e of entries) e.isIntersecting ? pending.add(e.target) : pending.delete(e.target);
   pump();
-}, { rootMargin: '600px' });
+}, { rootMargin: '400px' });
 function pump() {
-  while (active < 4 && queue.length) {
-    const el = queue.shift();
+  while (active < PARALLEL && pending.size) {
+    const el = pending.values().next().value;
+    pending.delete(el);
+    observer.unobserve(el);
     if (!el.isConnected) continue;
     active++;
     (async () => {
