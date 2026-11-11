@@ -336,6 +336,10 @@ function renderMoreEpisodes() {
     lazyThumb(el.querySelector('.cover'), ep);
   }
   v.shown += next.length;
+  // The observer only fires on enter/leave; on wide screens 60 cards may not push the sentinel out of range.
+  if (v.shown < items.length) requestAnimationFrame(() => {
+    if (episodeView === v && $('sentinel').getBoundingClientRect().top < innerHeight + 800) renderMoreEpisodes();
+  });
 }
 new IntersectionObserver(es => { if (es[0].isIntersecting && episodeView) renderMoreEpisodes(); }, { rootMargin: '800px' }).observe($('sentinel'));
 
