@@ -1,0 +1,19 @@
+# Explorer index: scan the remaining episodes, pool shards p1 and p2 of 3 (p0 runs on the workspace).
+# All processes rotate over the HF tokens in this repo's gitignored .env (HF_TOKEN_2, HF_TOKEN_3) plus
+# dev/abcbot/.env (HF_TOKEN); each account has its own 5000 resolves / 5 min quota.
+# A100 only because CPU-only jobs fail in the controller (asdict TypeError); the GPU is unused.
+# Output: /home/juheon/data/abc-robot-explorer/index-build/scan/shard-p{1,2}.jsonl (resumable)
+name: abc-index-scan-pool
+resources:
+  infra: k8s
+  accelerators: A100:1
+envs:
+  RISELAB_SETUP_SCRIPT: /home/juheon/dev/abc-vlm-analysis/setup_noop.sh
+run: |
+  cd /home/juheon/dev/abc-robot-explorer
+  set -a; source <(grep '^HF_TOKEN=' /home/juheon/dev/abcbot/.env); source .env; set +a
+  for i in 1 2; do
+    /home/juheon/dev/abc-vlm-analysis/.venv/bin/python -u tools/build_index.py scan --tag p --shard $i --nshards 3 --workers 48 \
+        --scratch $RISELAB_SCRATCH/abc-index 2>&1 | sed -u "s/^/[p$i] /" &
+  done
+  wait

@@ -214,15 +214,25 @@ function lazyThumb(el, episodeOrResolver) {
 // ---------- data model ----------
 const state = { splits: null, data: {}, view: ls.get('view') || 'grid', sort: ls.get('sort') || 'hours', dir: -1 };
 
+// Precomputed by tools/build_index.py: per-split task stats, so the overview needs no HF listing.
+let summaryP = null;
+const loadSummary = () => summaryP ??= fetch('index/summary.json', { cache: 'no-cache' }).then(r => r.ok ? r.json() : null).catch(() => null);
+
 async function loadSplits() {
   if (state.splits) return state.splits;
-  const dirs = (await listDir('data')).filter(d => d.dir).map(d => d.name);
+  const sum = await loadSummary();
+  const dirs = sum ? Object.keys(sum.splits) : (await listDir('data')).filter(d => d.dir).map(d => d.name);
   state.splits = dirs.sort((a, b) => (SPLIT_ORDER.indexOf(a) + 1 || 99) - (SPLIT_ORDER.indexOf(b) + 1 || 99));
   return state.splits;
 }
 
 async function loadSplit(split) {
   if (state.data[split]) return state.data[split];
+  const sum = (await loadSummary())?.splits[split];
+  if (sum) {
+    const tasks = Object.entries(sum).map(([name, s]) => ({ name, episodes: s.episodes, annotated: s.annotated, hours: s.hours, operators: s.operators, first: s.first, last: s.last, cover: s.cover }));
+    return state.data[split] = { split, tasks, total: null, report: true };
+  }
   const [dirs, rep] = await Promise.all([listDir('data/' + split), report(split)]);
   const tasks = dirs.filter(d => d.dir).map(d => {
     const s = rep?.tasks.get(norm(d.name));
@@ -233,6 +243,8 @@ async function loadSplit(split) {
 }
 
 const firstEpisode = async (split, task) => {
+  const cover = state.data[split]?.tasks.find(t => t.name === task)?.cover;
+  if (cover) return `data/${split}/${task}/${cover}`;
   const items = await listDir(`data/${split}/${task}`, { limit: 1 });
   const d = items.find(x => x.dir);
   if (!d) throw new Error('empty');
@@ -285,6 +297,7 @@ const avg = t => t.hours != null && t.episodes ? t.hours * 60 / t.episodes : nul
 const SORTS = {
   name: t => t.name, episodes: t => t.episodes ?? -1, hours: t => t.hours ?? -1,
   annotated: t => t.episodes ? (t.annotated ?? -1) / t.episodes : -1, avg: t => avg(t) ?? -1,
+  operators: t => t.operators ?? -1, last: t => t.last ?? -1,
 };
 
 function sortedTasks(data) {
@@ -301,13 +314,13 @@ function renderTasks(data) {
   box.className = state.view;
   if (state.view === 'table') {
     const th = (k, l) => `<th data-sort="${k}" class="${state.sort === k ? 'on' : ''}">${l}</th>`;
-    box.innerHTML = `<table><thead><tr><th></th>${th('name', 'task')}${th('episodes', 'episodes')}${th('annotated', 'annotated')}${th('hours', 'hours')}${th('avg', 'min/ep')}</tr></thead><tbody>${rows.map(t =>
-      `<tr data-task="${esc(t.name)}"><td class="thumb"><img alt=""></td><td>${esc(label(t.name))}</td><td data-count="${esc(t.name)}">${fmt(t.episodes)}</td><td>${t.annotated == null ? '–' : t.episodes ? Math.round(100 * t.annotated / t.episodes) + '%' : '–'}</td><td>${t.hours == null ? '–' : t.hours.toFixed(1)}</td><td>${avg(t) == null ? '–' : avg(t).toFixed(2)}</td></tr>`).join('')}</tbody></table>`;
+    box.innerHTML = `<table><thead><tr><th></th>${th('name', 'task')}${th('episodes', 'episodes')}${th('annotated', 'annotated')}${th('hours', 'hours')}${th('avg', 'min/ep')}${th('operators', 'users')}<th>recorded</th></tr></thead><tbody>${rows.map(t =>
+      `<tr data-task="${esc(t.name)}"><td class="thumb"><img alt=""></td><td>${esc(label(t.name))}</td><td data-count="${esc(t.name)}">${fmt(t.episodes)}</td><td>${t.annotated == null ? '–' : t.episodes ? Math.round(100 * t.annotated / t.episodes) + '%' : '–'}</td><td>${t.hours == null ? '–' : t.hours.toFixed(1)}</td><td>${avg(t) == null ? '–' : avg(t).toFixed(2)}</td><td>${t.operators ?? '–'}</td><td>${t.first ? `${fmtDay(t.first)} – ${fmtDay(t.last)}` : '–'}</td></tr>`).join('')}</tbody></table>`;
     box.querySelectorAll('th[data-sort]').forEach(h => h.onclick = () => setSort(h.dataset.sort, data));
     box.querySelectorAll('tr[data-task]').forEach(tr => { tr.onclick = () => { location.hash = `#/${data.split}/${tr.dataset.task}`; }; lazyThumb(tr.querySelector('.thumb'), () => firstEpisode(data.split, tr.dataset.task)); });
   } else {
     const maxHours = Math.max(...rows.map(t => t.hours || 0), 1);
-    box.innerHTML = rows.map((t, i) => `<a class="card" href="#/${esc(data.split)}/${esc(t.name)}"><div class="cover"><img alt=""><span class="rank">${i + 1}</span><h3>${esc(label(t.name))}</h3></div><div class="info"><p><b data-count="${esc(t.name)}">${fmt(t.episodes)}</b> ep${t.hours == null ? '' : ` · <b>${t.hours.toFixed(1)}</b> h`}${avg(t) == null ? '' : ` · ${avg(t).toFixed(1)} min/ep`}${t.annotated == null || !t.episodes ? '' : ` · ${Math.round(100 * t.annotated / t.episodes)}% ann`}</p>${t.hours == null ? '' : `<i class="bar" style="--w:${(100 * t.hours / maxHours).toFixed(1)}%"></i>`}</div></a>`).join('');
+    box.innerHTML = rows.map((t, i) => `<a class="card" href="#/${esc(data.split)}/${esc(t.name)}"><div class="cover"><img alt=""><span class="rank">${i + 1}</span><h3>${esc(label(t.name))}</h3></div><div class="info"><p><b data-count="${esc(t.name)}">${fmt(t.episodes)}</b> ep${t.hours == null ? '' : ` · <b>${t.hours.toFixed(1)}</b> h`}${avg(t) == null ? '' : ` · ${avg(t).toFixed(1)} min/ep`}${t.annotated == null || !t.episodes ? '' : ` · ${Math.round(100 * t.annotated / t.episodes)}% ann`}${t.operators ? ` · ${t.operators} users` : ''}${t.first ? `<br><small>${fmtDay(t.first)} – ${fmtDay(t.last)}</small>` : ''}</p>${t.hours == null ? '' : `<i class="bar" style="--w:${(100 * t.hours / maxHours).toFixed(1)}%"></i>`}</div></a>`).join('');
     box.querySelectorAll('.card').forEach((a, i) => lazyThumb(a.querySelector('.cover'), () => firstEpisode(data.split, rows[i].name)));
   }
   msg(rows.length ? '' : '—');
@@ -333,31 +346,35 @@ async function renderTask(split, task) {
   const view = episodeView = { split, task, items: [], shown: 0, list: [], cards: new Map(), filter: { from: null, to: null, ops: new Set() }, index: null };
   $('ep-annotated').checked = false;
   msg('…');
-  const items = await listEpisodes(`data/${split}/${task}`, n => { if (episodeView === view) msg(`… ${fmt(n)}`); });
+  const index = await fetchIndex(split, task);
   if (episodeView !== view) return;
+  const items = index ? Object.entries(index).map(([name, x]) => ({ name, size: x.size || 0, annotated: !!x.annotated }))
+    : await listEpisodes(`data/${split}/${task}`, n => { if (episodeView === view) msg(`… ${fmt(n)}`); });
+  if (episodeView !== view) return;
+  view.index = index;
   view.items = items;
   if (t.episodes == null) { t.episodes = items.length; $('task-meta').textContent = meta(); }
   msg(items.length ? '' : '—');
   if (!items.length) return;
   $('dash').classList.remove('hidden');
-  await loadIndex(view);
-  if (episodeView !== view) return;
+  applyIndex(view);
   resetGrid();
   renderDash();
 }
 
 // ---------- per-episode info: precomputed index/<split>/<task>.json ----------
 // { "episode_<uuid>": { "start": ms, "duration": s, "operator": "<id>", "annotated": bool } }
-async function loadIndex(view) {
-  view.index = null;
+async function fetchIndex(split, task) {
   try {
-    const r = await fetch(`index/${enc(view.split)}/${enc(view.task)}.json`, { cache: 'no-cache' });
-    if (!r.ok) return;
-    view.index = await r.json();
-  } catch { return; }
+    const r = await fetch(`index/${enc(split)}/${enc(task)}.json`, { cache: 'no-cache' });
+    return r.ok ? await r.json() : null;
+  } catch { return null; }
+}
+function applyIndex(view) {
+  if (!view.index) return;
   for (const it of view.items) {
     const x = view.index[it.name];
-    if (!x) continue;
+    if (!x || !x.start) continue;
     it.info = { start: +x.start || 0, duration: +x.duration || 0, operator: x.operator || '' };
     if (x.annotated) it.annotated = true;
   }
