@@ -1,5 +1,5 @@
 import { decompress, Decompress } from 'https://cdn.jsdelivr.net/npm/fzstd@0.1.1/+esm';
-import { firstFrame } from './mcap.js';
+import { firstFrame, episodeInfo } from './mcap.js';
 import { createViewer } from './viewer.js';
 
 const REPO = 'XDOF/ABC-130k';
@@ -67,6 +67,31 @@ async function listDir(path, { limit = 0, onPage } = {}) {
     if (limit && out.length >= limit) break;
     url = /<([^>]+)>;\s*rel="next"/.exec(r.headers.get('link') || '')?.[1];
   }
+  await cachePut(key, JSON.stringify(out), 'application/json');
+  return out;
+}
+
+// Every file under a task: episode dirs with episode.mcap size and whether annotation.mcap exists.
+async function listEpisodes(path, onPage) {
+  const key = `tree:${path}`;
+  const hit = await cacheGet(key, WEEK);
+  if (hit) return hit.json();
+  const eps = new Map();
+  const get = name => { let e = eps.get(name); if (!e) eps.set(name, e = { name, size: 0, annotated: false }); return e; };
+  let url = `${API}/tree/main/${enc(path)}?recursive=true&limit=1000`;
+  while (url) {
+    const r = await hf(url);
+    for (const it of await r.json()) {
+      const rel = it.path.slice(path.length + 1).split('/');
+      if (!rel[0].startsWith('episode')) continue;
+      const e = get(rel[0]);
+      if (rel[1] === 'episode.mcap') e.size = it.size;
+      if (rel[1] === 'annotation.mcap') e.annotated = true;
+    }
+    onPage?.(eps.size);
+    url = /<([^>]+)>;\s*rel="next"/.exec(r.headers.get('link') || '')?.[1];
+  }
+  const out = [...eps.values()];
   await cachePut(key, JSON.stringify(out), 'application/json');
   return out;
 }
@@ -304,37 +329,152 @@ async function renderTask(split, task) {
   const meta = () => [t.episodes != null && `${fmt(t.episodes)} ep`, t.hours != null && `${t.hours.toFixed(1)} h`, avg(t) != null && `${avg(t).toFixed(2)} min/ep`, t.annotated != null && t.episodes && `${Math.round(100 * t.annotated / t.episodes)}% ann`].filter(Boolean).join(' · ');
   $('task-meta').textContent = meta();
   $('episodes').innerHTML = '';
-  const view = episodeView = { split, task, items: [], shown: 0 };
+  $('dash').classList.add('hidden');
+  const view = episodeView = { split, task, items: [], shown: 0, list: [], cards: new Map(), filter: { from: null, to: null, ops: new Set() }, scanned: 0 };
+  $('ep-annotated').checked = false;
   msg('…');
-  const items = (await listDir(`data/${split}/${task}`, { onPage: n => { if (episodeView === view) msg(`… ${fmt(n)}`); } })).filter(x => x.dir);
+  const items = await listEpisodes(`data/${split}/${task}`, n => { if (episodeView === view) msg(`… ${fmt(n)}`); });
   if (episodeView !== view) return;
   view.items = items;
   if (t.episodes == null) { t.episodes = items.length; $('task-meta').textContent = meta(); }
   msg(items.length ? '' : '—');
-  renderMoreEpisodes();
+  if (!items.length) return;
+  $('dash').classList.remove('hidden');
+  await loadCachedInfos(view);
+  resetGrid();
+  renderDash();
+  scanInfos(view);
+}
+
+// ---------- per-episode info: recording time, operator, inline annotations ----------
+const infoKey = v => `infos:${v.split}/${v.task}`;
+async function loadCachedInfos(view) {
+  const c = await (await cacheGet(infoKey(view)))?.json();
+  if (!c) return;
+  for (const it of view.items) { const x = c[it.name]; if (x) it.info = { start: x[0], duration: x[1], operator: x[2], inline: !!x[3] }; }
+}
+const saveInfos = view => cachePut(infoKey(view), JSON.stringify(Object.fromEntries(view.items.filter(i => i.info)
+  .map(i => [i.name, [i.info.start, i.info.duration, i.info.operator, i.info.inline ? 1 : 0]]))), 'application/json');
+
+async function fetchInfo(path) {
+  const s = await sign(path);
+  const info = await episodeInfo((a, b) => range(s, a, b), s.size);
+  const md = info.metadata;
+  return {
+    start: Math.round(info.start / 1e6), duration: info.duration,
+    operator: md.operator_id || md['operator-id'] || md.operator || md.user || '',
+    inline: info.topics.includes('/subtask-annotation'),
+  };
+}
+
+const INFO_PARALLEL = 8;
+async function scanInfos(view) {
+  const todo = view.items.filter(it => !it.info);
+  view.scanTotal = todo.length;
+  view.scanned = 0;
+  view.scanErrors = 0;
+  if (!todo.length) return renderDash();
+  let unsaved = 0;
+  const worker = async () => {
+    while (todo.length && episodeView === view) {
+      const it = todo.shift();
+      try {
+        it.info = await fetchInfo(`data/${view.split}/${view.task}/${it.name}/episode.mcap`);
+        if (++unsaved >= 100) { unsaved = 0; saveInfos(view); }
+        updateCard(view, it);
+      } catch (e) {
+        if (e instanceof AuthError) { todo.length = 0; return showGate(e.message); }
+        view.scanErrors++;
+        console.warn(it.name, e);
+      }
+      view.scanned++;
+      scheduleDash();
+    }
+  };
+  await Promise.all(Array.from({ length: INFO_PARALLEL }, worker));
+  if (episodeView !== view) return;
+  await saveInfos(view);
+  resetGrid(); // final order now that every recording time is known
+  renderDash();
+}
+
+// ---------- filtering + sorting ----------
+const DAY = 864e5;
+const dayStart = ms => { const d = new Date(ms); d.setHours(0, 0, 0, 0); return d.getTime(); };
+const weekStart = ms => { const d = new Date(dayStart(ms)); d.setDate(d.getDate() - (d.getDay() + 6) % 7); return d.getTime(); };
+const fmtDay = ms => new Date(ms).toLocaleDateString('sv-SE');
+const fmtStamp = ms => new Date(ms).toLocaleString('sv-SE', { dateStyle: 'short', timeStyle: 'short' });
+const opShort = op => op ? op.slice(0, 8) : '(없음)';
+const PALETTE = ['#4e79a7', '#f28e2b', '#59a14f', '#e15759', '#b07aa1', '#76b7b2', '#edc948', '#ff9da7', '#9c755f', '#3b8bd4', '#8cd17d', '#d37295'];
+const opColor = op => { if (!op) return '#9a9a9a'; let h = 0; for (const c of op) h = (h * 31 + c.charCodeAt(0)) >>> 0; return PALETTE[h % PALETTE.length]; };
+const isAnnotated = it => it.annotated || it.info?.inline;
+
+const EP_SORTS = {
+  'date-desc': [it => it.info?.start, -1], 'date-asc': [it => it.info?.start, 1],
+  op: [it => it.info ? it.info.operator || '￿' : undefined, 1],
+  'dur-desc': [it => it.info?.duration, -1], 'dur-asc': [it => it.info?.duration, 1],
+  name: [it => it.name, 1],
+};
+state.epSort = EP_SORTS[ls.get('ep-sort')] ? ls.get('ep-sort') : 'date-desc';
+
+// skip: filter dimensions to ignore ('date', 'op'), so each chart cross-filters by the others
+function passes(it, ...skip) {
+  const v = episodeView, f = v.filter, q = $('search').value.trim().toLowerCase();
+  if (q && !it.name.toLowerCase().includes(q) && !(it.info?.operator || '').toLowerCase().includes(q)) return false;
+  if ($('ep-annotated').checked && !isAnnotated(it)) return false;
+  if (!skip.includes('date') && f.from != null && !(it.info?.start >= f.from && it.info.start < f.to)) return false;
+  if (!skip.includes('op') && f.ops.size && !(it.info && f.ops.has(it.info.operator))) return false;
+  return true;
 }
 
 function filteredEpisodes() {
-  const q = $('search').value.trim().toLowerCase();
-  return q ? episodeView.items.filter(x => x.name.toLowerCase().includes(q)) : episodeView.items;
+  const [key, dir] = EP_SORTS[state.epSort];
+  return episodeView.items.filter(it => passes(it)).sort((a, b) => {
+    const x = key(a), y = key(b);
+    if (x === y) return a.name < b.name ? -1 : 1;
+    if (x === undefined) return 1; // unknown last
+    if (y === undefined) return -1;
+    return (x < y ? -1 : 1) * dir;
+  });
+}
+
+function resetGrid() {
+  const v = episodeView;
+  if (!v) return;
+  v.list = filteredEpisodes();
+  v.shown = 0;
+  v.cards = new Map();
+  $('episodes').innerHTML = '';
+  msg(v.list.length ? '' : '—');
+  renderMoreEpisodes();
+}
+
+function cardMeta(it) {
+  const i = it.info;
+  return `<i style="--c:${i ? opColor(i.operator) : 'var(--line)'}"></i><span>${i?.start ? fmtStamp(i.start) : '…'}</span><span>${i ? esc(opShort(i.operator)) : ''}</span>${isAnnotated(it) ? '<em>ann</em>' : ''}`;
+}
+function updateCard(view, it) {
+  const el = view.cards.get(it.name);
+  if (el) el.querySelector('.meta').innerHTML = cardMeta(it);
 }
 
 function renderMoreEpisodes() {
   const v = episodeView;
   if (!v) return;
-  const items = filteredEpisodes();
+  const items = v.list;
   const next = items.slice(v.shown, v.shown + 60);
   const box = $('episodes');
-  for (const it of next) {
+  next.forEach((it, k) => {
     const ep = `data/${v.split}/${v.task}/${it.name}`;
     const el = document.createElement('button');
     el.className = 'ep';
-    el.innerHTML = `<div class="cover"><img alt=""><span class="dur"></span></div><code>${esc(it.name.replace(/^episode_/, '').slice(0, 13))}</code>`;
-    const index = v.shown + next.indexOf(it);
+    el.innerHTML = `<div class="cover"><img alt=""><span class="dur"></span></div><code>${esc(it.name.replace(/^episode_/, '').slice(0, 13))}</code><div class="meta">${cardMeta(it)}</div>`;
+    const index = v.shown + k;
     el.onclick = () => openEpisodeAt(items, index);
     box.appendChild(el);
+    v.cards.set(it.name, el);
     lazyThumb(el.querySelector('.cover'), ep);
-  }
+  });
   v.shown += next.length;
   // The observer only fires on enter/leave; on wide screens 60 cards may not push the sentinel out of range.
   if (v.shown < items.length) requestAnimationFrame(() => {
@@ -342,6 +482,162 @@ function renderMoreEpisodes() {
   });
 }
 new IntersectionObserver(es => { if (es[0].isIntersecting && episodeView) renderMoreEpisodes(); }, { rootMargin: '800px' }).observe($('sentinel'));
+
+// ---------- dashboard ----------
+state.metric = ls.get('metric') === 'hours' ? 'hours' : 'episodes';
+const metricOf = it => state.metric === 'hours' ? (it.info?.duration || 0) / 3600 : 1;
+const fmtMetric = v => state.metric === 'hours' ? (v < 10 ? v.toFixed(2) : v.toFixed(1)) + ' h' : fmt(Math.round(v)) + ' ep';
+
+let dashTimer = null;
+function scheduleDash() { if (!dashTimer) dashTimer = setTimeout(() => { dashTimer = null; renderDash(); }, 400); }
+
+function renderDash() {
+  const v = episodeView;
+  if (!v || !v.items.length) return;
+  const f = v.filter;
+  const all = v.items, known = all.filter(it => it.info?.start);
+  const sel = all.filter(it => passes(it));
+  const selKnown = sel.filter(it => it.info);
+  const hours = selKnown.reduce((a, it) => a + (it.info.duration || 0), 0) / 3600;
+  const ops = new Set(selKnown.map(it => it.info.operator));
+  const times = selKnown.map(it => it.info.start).filter(Boolean);
+  const first = times.length ? times.reduce((x, y) => Math.min(x, y)) : null, last = times.length ? times.reduce((x, y) => Math.max(x, y)) : null;
+  const filtered = f.from != null || f.ops.size || $('ep-annotated').checked || $('search').value.trim();
+  const kpi = [
+    ['episodes', fmt(sel.length) + (filtered ? `<small> / ${fmt(all.length)}</small>` : '')],
+    ['hours', hours.toFixed(1)],
+    ['유저', fmt(ops.size)],
+    ['annotated', fmt(sel.filter(isAnnotated).length)],
+    ['기간', first ? `<small>${fmtDay(first)} – ${fmtDay(last)}</small>` : '–'],
+  ];
+  $('dash-kpis').innerHTML = kpi.map(([k, x]) => `<div><b>${x}</b><span>${k}</span></div>`).join('');
+  $('dash-reset').classList.toggle('hidden', !(f.from != null || f.ops.size));
+  $('dash-range').textContent = f.from != null ? `${fmtDay(f.from)}${f.to - f.from > DAY ? ' – ' + fmtDay(f.to - 1) : ''}` : '';
+  const remaining = (v.scanTotal || 0) - (v.scanned || 0);
+  $('dash-progress').textContent = remaining > 0 && episodeView === v
+    ? `녹화 정보 읽는 중 ${fmt(v.scanned)} / ${fmt(v.scanTotal)} — 차트·정렬은 읽은 것까지 반영돼요 (다음부터는 캐시)`
+    : v.scanErrors ? `${fmt(v.scanErrors)}개 에피소드는 정보를 못 읽었어요` : '';
+  drawHistogram(v, known);
+  drawOperators(v);
+}
+
+function drawHistogram(v, known) {
+  const box = $('dash-hist');
+  if (!known.length) { box.innerHTML = `<p class="hint">${v.scanTotal ? '…' : '녹화 시간 정보 없음'}</p>`; return; }
+  const times = known.map(it => it.info.start);
+  const lo = times.reduce((x, y) => Math.min(x, y)), hi = times.reduce((x, y) => Math.max(x, y));
+  const weekly = (hi - lo) / DAY > 180;
+  const binOf = weekly ? weekStart : dayStart;
+  const step = d => { const x = new Date(d); x.setDate(x.getDate() + (weekly ? 7 : 1)); return x.getTime(); };
+  const bins = [];
+  for (let b = binOf(lo); b <= hi; b = step(b)) bins.push({ t: b, end: step(b), v: 0, all: 0, ops: new Map() });
+  const idx = new Map(bins.map((b, i) => [b.t, i]));
+  const opFiltered = v.filter.ops.size > 0;
+  for (const it of known) {
+    const b = bins[idx.get(binOf(it.info.start))];
+    if (!b) continue;
+    const m = metricOf(it);
+    if (passes(it, 'date')) { b.v += m; b.ops.set(it.info.operator, (b.ops.get(it.info.operator) || 0) + m); }
+    // ghost bars: everyone (operator filter ignored), so the selected users show against the whole
+    if (opFiltered && passes(it, 'date', 'op')) b.all += m;
+  }
+  const W = box.clientWidth || 600, H = box.clientHeight || 200, L = 40, R = 6, T = 8, B = 22;
+  const iw = W - L - R, ih = H - T - B, n = bins.length, bw = iw / n;
+  const max = Math.max(...bins.map(b => Math.max(b.v, b.all)), state.metric === 'hours' ? 0.1 : 1);
+  const tick = niceStep(max / 4);
+  const top = Math.ceil(max / tick) * tick;
+  const y = x => T + ih - x / top * ih;
+  let svg = '';
+  for (let g = 0; g <= top + 1e-9; g += tick) svg += `<line class="grid-l" x1="${L}" x2="${W - R}" y1="${y(g)}" y2="${y(g)}"/><text class="axis" x="${L - 6}" y="${y(g) + 3}" text-anchor="end">${state.metric === 'hours' ? +g.toFixed(2) : fmt(g)}</text>`;
+  const f = v.filter, gap = bw > 6 ? Math.min(2, bw * 0.2) : 0;
+  bins.forEach((b, i) => {
+    const x = L + i * bw + gap / 2, w = Math.max(1, bw - gap);
+    const out = f.from != null && !(b.t >= f.from && b.t < f.to);
+    if (f.ops.size && b.all > b.v) svg += `<rect class="b ghost" x="${x}" y="${y(b.all)}" width="${w}" height="${ih + T - y(b.all)}" rx="1.5"/>`;
+    if (b.v) svg += `<rect class="b${out ? ' dim' : ''}" x="${x}" y="${y(b.v)}" width="${w}" height="${ih + T - y(b.v)}" rx="1.5"/>`;
+  });
+  const multiYear = new Date(lo).getFullYear() !== new Date(hi).getFullYear();
+  const every = Math.max(1, Math.ceil(n / Math.max(2, Math.floor(iw / 70))));
+  bins.forEach((b, i) => {
+    if (i % every) return;
+    const d = new Date(b.t), lab = `${multiYear ? String(d.getFullYear()).slice(2) + '/' : ''}${d.getMonth() + 1}/${d.getDate()}`;
+    svg += `<text class="axis" x="${L + (i + 0.5) * bw}" y="${H - 6}" text-anchor="middle">${lab}</text>`;
+  });
+  if (f.from != null) {
+    const a = bins.findIndex(b => b.t >= f.from), z = bins.findLastIndex(b => b.t < f.to);
+    if (a >= 0 && z >= a) svg += `<rect class="brush" x="${L + a * bw}" y="${T}" width="${(z - a + 1) * bw}" height="${ih}" rx="3"/>`;
+  }
+  box.innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none"><rect class="hover" id="hist-hover" x="0" y="${T}" width="0" height="${ih}"/>${svg}<rect id="hist-drag" class="brush hidden" x="0" y="${T}" width="0" height="${ih}" rx="3"/></svg><div class="tip hidden"></div>`;
+  const el = box.querySelector('svg'), tip = box.querySelector('.tip'), hover = box.querySelector('#hist-hover'), drag = box.querySelector('#hist-drag');
+  const at = e => { const r = el.getBoundingClientRect(); return Math.max(0, Math.min(n - 1, Math.floor((e.clientX - r.left - L * r.width / W) / (bw * r.width / W)))); };
+  let down = null;
+  el.onpointerdown = e => { down = at(e); el.setPointerCapture(e.pointerId); };
+  el.onpointermove = e => {
+    const i = at(e), b = bins[i];
+    hover.setAttribute('x', L + i * bw); hover.setAttribute('width', bw);
+    if (down != null && i !== down) {
+      const a = Math.min(i, down), z = Math.max(i, down);
+      drag.classList.remove('hidden'); drag.setAttribute('x', L + a * bw); drag.setAttribute('width', (z - a + 1) * bw);
+    }
+    const topOps = [...b.ops].sort((p, q) => q[1] - p[1]).slice(0, 4);
+    tip.innerHTML = `<b>${weekly ? fmtDay(b.t) + ' 주' : fmtDay(b.t)}</b> · ${fmtMetric(b.v)}${topOps.map(([op, m]) => `<br><i style="background:${opColor(op)}"></i>${esc(opShort(op))} ${fmtMetric(m)}`).join('')}${b.ops.size > 4 ? `<br>+${b.ops.size - 4}명` : ''}`;
+    tip.classList.remove('hidden');
+    const r = el.getBoundingClientRect(), px = e.clientX - r.left;
+    tip.style.left = Math.min(px + 12, r.width - tip.offsetWidth - 4) + 'px';
+    tip.style.top = '4px';
+  };
+  el.onpointerleave = () => { tip.classList.add('hidden'); hover.setAttribute('width', 0); };
+  el.onpointerup = e => {
+    if (down == null) return;
+    const i = at(e), a = Math.min(i, down), z = Math.max(i, down);
+    down = null;
+    const from = bins[a].t, to = bins[z].end;
+    if (a === z && f.from === from && f.to === to) { f.from = f.to = null; } else { f.from = from; f.to = to; }
+    applyFilter();
+  };
+  el.ondblclick = () => { f.from = f.to = null; applyFilter(); };
+}
+function niceStep(x) {
+  if (x <= 0) return 1;
+  const p = 10 ** Math.floor(Math.log10(x)), m = x / p;
+  return (m <= 1 ? 1 : m <= 2 ? 2 : m <= 5 ? 5 : 10) * p;
+}
+
+function drawOperators(v) {
+  const rows = new Map();
+  for (const it of v.items) {
+    if (!it.info || !passes(it, 'op')) continue;
+    const op = it.info.operator, r = rows.get(op) || { op, v: 0, n: 0, h: 0, last: 0 };
+    r.v += metricOf(it); r.n++; r.h += (it.info.duration || 0) / 3600; r.last = Math.max(r.last, it.info.start || 0);
+    rows.set(op, r);
+  }
+  const list = [...rows.values()].sort((a, b) => b.v - a.v);
+  for (const op of v.filter.ops) if (!rows.has(op)) list.push({ op, v: 0, n: 0, h: 0, last: 0 });
+  const max = Math.max(1e-9, ...list.map(r => r.v));
+  $('dash-ops-note').textContent = list.length ? `${fmt(list.length)}명 · 클릭해서 필터 (여러 명 가능)` : '';
+  const sel = v.filter.ops;
+  $('dash-ops').innerHTML = list.length ? list.map(r => `<button class="op${sel.size ? sel.has(r.op) ? ' on' : ' off' : ''}" data-op="${esc(r.op)}" style="--c:${opColor(r.op)};--w:${(100 * r.v / max).toFixed(1)}%" title="${esc(r.op || '(operator_id 없음)')}\n${fmt(r.n)} ep · ${r.h.toFixed(2)} h${r.last ? '\n마지막 녹화 ' + fmtStamp(r.last) : ''}"><i></i><code>${esc(opShort(r.op))}</code><span>${fmt(r.n)} ep · ${r.h.toFixed(1)} h</span></button>`).join('')
+    : `<p class="hint">${v.scanTotal ? '…' : '유저 정보 없음'}</p>`;
+  $('dash-ops').querySelectorAll('.op').forEach(b => b.onclick = e => {
+    const op = b.dataset.op;
+    if (e.metaKey || e.ctrlKey || e.shiftKey || sel.size) { sel.has(op) ? sel.delete(op) : sel.add(op); }
+    else sel.add(op);
+    applyFilter();
+  });
+}
+
+function applyFilter() { resetGrid(); renderDash(); }
+
+$('ep-sort').value = state.epSort;
+$('ep-sort').onchange = () => { state.epSort = $('ep-sort').value; ls.set('ep-sort', state.epSort); resetGrid(); };
+$('ep-annotated').onchange = applyFilter;
+$('dash-reset').onclick = () => { const f = episodeView?.filter; if (!f) return; f.from = f.to = null; f.ops.clear(); applyFilter(); };
+$('dash-metric').querySelectorAll('button').forEach(b => {
+  b.classList.toggle('on', b.dataset.m === state.metric);
+  b.onclick = () => { state.metric = b.dataset.m; ls.set('metric', state.metric); $('dash-metric').querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b)); renderDash(); };
+});
+let resizeTimer;
+addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(renderDash, 150); });
 
 const player = createViewer({
   sign, range, decompress: d => decompress(d),
@@ -352,9 +648,11 @@ function openEpisodeAt(items, i) {
   const v = episodeView, it = items[i];
   if (!v || !it) return;
   const ep = `data/${v.split}/${v.task}/${it.name}`;
+  const extra = it.info ? [it.info.start && fmtStamp(it.info.start), it.info.operator && `user ${opShort(it.info.operator)}`].filter(Boolean).join(' · ') : '';
   player.open(ep, {
     title: label(v.task),
-    subtitle: `${v.split} · ${it.name.replace(/^episode_/, '')} · ${i + 1} / ${items.length}`,
+    subtitle: `${v.split} · ${it.name.replace(/^episode_/, '')} · ${i + 1} / ${items.length}${extra ? ' · ' + extra : ''}`,
+    annotation: it.annotated,
     onPrev: i > 0 ? () => openEpisodeAt(items, i - 1) : null,
     onNext: i < items.length - 1 ? () => openEpisodeAt(items, i + 1) : null,
   });
@@ -423,7 +721,7 @@ let searchTimer;
 $('search').oninput = () => {
   clearTimeout(searchTimer);
   searchTimer = setTimeout(() => {
-    if (episodeView) { episodeView.shown = 0; $('episodes').innerHTML = ''; renderMoreEpisodes(); }
+    if (episodeView) applyFilter();
     else { const split = location.hash.split('/')[1]; if (state.data[split]) renderTasks(state.data[split]); }
   }, 200);
 };

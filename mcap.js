@@ -219,3 +219,85 @@ export async function firstFrame(fetchRange, size, decompress, Stream) {
   const format = text(f[4]).toLowerCase() === 'h264' ? 'h264' : 'h265';
   return { kind: 'video', format, data: f[3], codec: codecString(format, f[3]), topic: cam.topic, instruction, duration: meta.duration, cameras: cams.length };
 }
+
+// ---------- episode info (start time, metadata, channels) from a few KB at the end of the file ----------
+function footer(tail) {
+  const f = new Reader(tail.subarray(tail.length - FOOTER));
+  if (f.b[0] !== 0x02) throw new Error('mcap footer');
+  f.o = 9;
+  return { summaryStart: f.u64(), summaryOffsetStart: f.u64() };
+}
+
+function metadataRecord(body) {
+  const r = new Reader(body);
+  const name = r.str(), end = r.o + 4 + r.u32(), out = {};
+  while (r.o < end) { const k = r.str(); out[k] = r.str(); }
+  return { name, metadata: out };
+}
+
+// Start time (ns), duration (s), merged metadata records and channel topics. Usually 2-3 small range reads.
+export async function episodeInfo(fetchRange, size, tailSize = 32 * 1024) {
+  const base = Math.max(0, size - tailSize);
+  const tail = await fetchRange(base, size - 1);
+  const { summaryStart, summaryOffsetStart } = footer(tail);
+  if (!summaryStart) throw new Error('mcap without summary');
+  const slice = async (a, b) => a >= base ? tail.subarray(a - base, b - base) : fetchRange(a, b - 1);
+  const groups = [];
+  if (summaryOffsetStart && summaryOffsetStart >= base) {
+    for (const { op, body } of records(tail.subarray(summaryOffsetStart - base, tail.length - FOOTER))) {
+      if (op !== 0x0e) continue;
+      const r = new Reader(body);
+      const opcode = body[0]; r.o = 1;
+      const start = r.u64(), length = r.u64();
+      if ([0x03, 0x04, 0x0b, 0x0d].includes(opcode)) groups.push([start, start + length]);
+    }
+  }
+  if (!groups.length) groups.push([summaryStart, (summaryOffsetStart || size - FOOTER)]);
+  const bufs = await Promise.all(groups.map(([a, b]) => slice(a, b)));
+  let start = 0, end = 0;
+  const topics = [], metaIdx = [];
+  for (const buf of bufs) for (const { op, body } of records(buf)) {
+    const r = new Reader(body);
+    if (op === 0x04) { r.u16(); r.u16(); topics.push(r.str()); }
+    else if (op === 0x0b) { r.u64(); r.u16(); r.u32(); r.u32(); r.u32(); r.u32(); start = r.u64(); end = r.u64(); }
+    else if (op === 0x0d) { const offset = r.u64(), length = r.u64(); metaIdx.push({ offset, length, name: r.str() }); }
+  }
+  const metadata = {};
+  await Promise.all(metaIdx.map(async m => {
+    const buf = await slice(m.offset, m.offset + m.length);
+    const rec = records(buf).next().value;
+    if (rec?.op === 0x0c) Object.assign(metadata, metadataRecord(rec.body).metadata);
+  }));
+  return { start, duration: end > start ? (end - start) / 1e9 : 0, metadata, topics };
+}
+
+// Every message of a (small) MCAP file, read in one request and parsed linearly. For annotation.mcap.
+export async function readWhole(fetchRange, size, decompress) {
+  const buf = await fetchRange(0, size - 1);
+  const channels = new Map(), messages = [];
+  const visit = (raw) => {
+    for (const { op, body } of records(raw)) {
+      const r = new Reader(body);
+      if (op === 0x04) { const id = r.u16(); r.u16(); channels.set(id, { id, topic: r.str() }); }
+      else if (op === 0x05) messages.push({ channel: r.u16(), seq: r.u32(), time: r.u64(), data: body.subarray(22) });
+      else if (op === 0x06) {
+        r.u64(); r.u64(); const rawSize = r.u64(); r.u32();
+        const compression = r.str();
+        const data = r.bytes(r.u64());
+        visit(compression === '' ? data : compression === 'zstd' ? decompress(data, rawSize) : new Uint8Array());
+      }
+    }
+  };
+  visit(buf.subarray(8)); // magic
+  return { channels, messages };
+}
+
+// Best-effort text payload of a protobuf message (subtask labels / instructions).
+export function protoText(buf) {
+  const f = protoFields(buf);
+  const ok = b => b instanceof Uint8Array && b.length && !/[\x00-\x08\x0e-\x1f�]/.test(text(b));
+  if (ok(f[2])) return text(f[2]);
+  let best = '';
+  for (const v of Object.values(f)) if (ok(v) && text(v).length > best.length) best = text(v);
+  return best;
+}

@@ -1,6 +1,6 @@
 // In-page episode player: streams MCAP chunks over HTTP Range, decodes every camera with WebCodecs,
 // keeps the cameras in sync on one clock, and plots arm joints as data arrives.
-import { readSummary, readChunk, protoFields, protoDoubles, text, isKeyframe, codecString } from './mcap.js';
+import { readSummary, readChunk, readWhole, protoFields, protoDoubles, protoText, text, isKeyframe, codecString } from './mcap.js';
 
 const CAMERA_ORDER = ['/top-left-camera', '/top-camera', '/top-right-camera', '/left-wrist-camera', '/right-wrist-camera'];
 const PARALLEL_CHUNKS = 6;
@@ -12,14 +12,16 @@ const fmtTime = s => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStar
 export function createViewer({ sign, range, decompress, onAuthError }) {
   let session = null;
 
-  async function open(ep, { title, subtitle, onPrev, onNext }) {
+  async function open(ep, { title, subtitle, onPrev, onNext, annotation }) {
     close();
-    const s = session = { ep, closed: false, abort: new AbortController() };
+    const s = session = { ep, annotation, closed: false, abort: new AbortController() };
     $('pv-title').textContent = title;
     $('pv-id').textContent = subtitle;
     $('pv-instruction').textContent = '';
     $('pv-status').textContent = '…';
     $('pv-cams').innerHTML = '';
+    $('pv-subtasks').innerHTML = '';
+    $('pv-subtask').textContent = '';
     $('pv-prev').disabled = !onPrev; $('pv-prev').onclick = onPrev;
     $('pv-next').disabled = !onNext; $('pv-next').onclick = onNext;
     const dlg = $('player');
@@ -86,8 +88,11 @@ export function createViewer({ sign, range, decompress, onAuthError }) {
       const m = /^\/(left|right)-(arm|ee)-state$/.exec(c.topic);
       if (m) s.byChannel.set(c.id, { kind: 'tele', side: m[1], part: m[2] });
       if (c.topic === '/instruction') s.byChannel.set(c.id, { kind: 'instruction' });
+      if (c.topic === '/subtask-annotation') s.byChannel.set(c.id, { kind: 'subtask' });
     }
     s.instructions = [];
+    s.subtasks = [];
+    if (s.annotation) loadAnnotations(s);
     s.playhead = 0; s.playing = false; s.speed = +$('pv-speed').value || 1; s.focus = 0; s.active = 0;
     s.lastTick = performance.now();
     setupControls(s);
@@ -149,12 +154,56 @@ export function createViewer({ sign, range, decompress, onAuthError }) {
       } else if (role.kind === 'instruction') {
         const said = text(protoFields(m.data)[2]);
         if (said) s.instructions.push([t, said]);
+      } else if (role.kind === 'subtask') {
+        addSubtask(s, t, protoText(m.data));
       }
     }
     for (const cam of s.cams) cam.keyframes.sort((a, b) => a.t - b.t);
     s.instructions.sort((a, b) => a[0] - b[0]);
     s.chunks[ci].samples = samples;
     s.chunks[ci].telemetry = tele;
+  }
+
+  // ---------- subtask annotations ----------
+  function addSubtask(s, t, label) {
+    if (!label || s.subtasks.some(x => x[0] === t)) return;
+    s.subtasks.push([t, label]);
+    s.subtasks.sort((a, b) => a[0] - b[0]);
+    s.dirtySubtasks = true;
+  }
+
+  async function loadAnnotations(s) {
+    try {
+      const signed = await sign(s.ep + '/annotation.mcap');
+      const { channels, messages } = await readWhole((a, b) => range(signed, a, b, s.abort.signal), signed.size, decompress);
+      if (s.closed) return;
+      for (const m of messages) {
+        const topic = channels.get(m.channel)?.topic, t = (m.time - s.start) / 1e3;
+        if (topic === '/subtask-annotation') addSubtask(s, t, protoText(m.data));
+        else if (topic === '/instruction') { const said = protoText(m.data); if (said) s.instructions.push([t, said]); }
+      }
+      s.instructions.sort((a, b) => a[0] - b[0]);
+    } catch (e) {
+      if (!s.closed) $('pv-subtask').textContent = 'annotation: ' + e.message;
+    }
+  }
+
+  function drawSubtasks(s) {
+    const box = $('pv-subtasks'), span = s.duration * 1e6;
+    box.innerHTML = '';
+    s.subtasks.forEach(([t, label], i) => {
+      const next = s.subtasks[i + 1]?.[0] ?? span;
+      const el = document.createElement('button');
+      el.className = 'seg' + (i % 2 ? ' alt' : '');
+      el.style.left = (100 * Math.max(0, t) / span) + '%';
+      el.style.width = (100 * Math.max(0, next - Math.max(0, t)) / span) + '%';
+      el.title = `${i + 1}. ${label} (${fmtTime(Math.max(0, t) / 1e6)}–${fmtTime(next / 1e6)})`;
+      el.innerHTML = `<span>${i + 1}. ${label.replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]))}</span>`;
+      el.onclick = () => seek(s, Math.max(0, t));
+      box.appendChild(el);
+    });
+    s.subtaskEls = [...box.children];
+    s.curSubtask = undefined;
   }
 
   // ---------- decoding ----------
@@ -299,6 +348,16 @@ export function createViewer({ sign, range, decompress, onAuthError }) {
     for (const [t, x] of s.instructions) { if (t <= s.playhead + 1) said = x; else break; }
     if (!said && s.instructions.length) said = s.instructions[0][1];
     if ($('pv-instruction').textContent !== said) $('pv-instruction').textContent = said;
+    if (s.dirtySubtasks) { drawSubtasks(s); s.dirtySubtasks = false; }
+    if (s.subtasks.length) {
+      let cur = -1;
+      s.subtasks.forEach(([t], i) => { if (t <= s.playhead + 1) cur = i; });
+      if (cur !== s.curSubtask) {
+        s.curSubtask = cur;
+        s.subtaskEls?.forEach((el, i) => el.classList.toggle('on', i === cur));
+        $('pv-subtask').textContent = cur < 0 ? `subtasks · ${s.subtasks.length}` : `▸ ${cur + 1}/${s.subtasks.length} · ${s.subtasks[cur][1]}`;
+      }
+    }
     const now = performance.now();
     if (s.dirtyChart || now - (s.chartAt || 0) > 100) { drawCharts(s); s.chartAt = now; s.dirtyChart = false; }
   }
