@@ -1,5 +1,5 @@
 import { decompress, Decompress } from 'https://cdn.jsdelivr.net/npm/fzstd@0.1.1/+esm';
-import { firstFrame, episodeInfo } from './mcap.js';
+import { firstFrame } from './mcap.js';
 import { createViewer } from './viewer.js';
 
 const REPO = 'XDOF/ABC-130k';
@@ -330,7 +330,7 @@ async function renderTask(split, task) {
   $('task-meta').textContent = meta();
   $('episodes').innerHTML = '';
   $('dash').classList.add('hidden');
-  const view = episodeView = { split, task, items: [], shown: 0, list: [], cards: new Map(), filter: { from: null, to: null, ops: new Set() }, scanned: 0 };
+  const view = episodeView = { split, task, items: [], shown: 0, list: [], cards: new Map(), filter: { from: null, to: null, ops: new Set() }, index: null };
   $('ep-annotated').checked = false;
   msg('…');
   const items = await listEpisodes(`data/${split}/${task}`, n => { if (episodeView === view) msg(`… ${fmt(n)}`); });
@@ -340,62 +340,28 @@ async function renderTask(split, task) {
   msg(items.length ? '' : '—');
   if (!items.length) return;
   $('dash').classList.remove('hidden');
-  await loadCachedInfos(view);
+  await loadIndex(view);
+  if (episodeView !== view) return;
   resetGrid();
   renderDash();
-  scanInfos(view);
 }
 
-// ---------- per-episode info: recording time, operator, inline annotations ----------
-const infoKey = v => `infos:${v.split}/${v.task}`;
-async function loadCachedInfos(view) {
-  const c = await (await cacheGet(infoKey(view)))?.json();
-  if (!c) return;
-  for (const it of view.items) { const x = c[it.name]; if (x) it.info = { start: x[0], duration: x[1], operator: x[2], inline: !!x[3] }; }
-}
-const saveInfos = view => cachePut(infoKey(view), JSON.stringify(Object.fromEntries(view.items.filter(i => i.info)
-  .map(i => [i.name, [i.info.start, i.info.duration, i.info.operator, i.info.inline ? 1 : 0]]))), 'application/json');
-
-async function fetchInfo(path) {
-  const s = await sign(path);
-  const info = await episodeInfo((a, b) => range(s, a, b), s.size);
-  const md = info.metadata;
-  return {
-    start: Math.round(info.start / 1e6), duration: info.duration,
-    operator: md.operator_id || md['operator-id'] || md.operator || md.user || '',
-    inline: info.topics.includes('/subtask-annotation'),
-  };
-}
-
-const INFO_PARALLEL = 8;
-async function scanInfos(view) {
-  const todo = view.items.filter(it => !it.info);
-  view.scanTotal = todo.length;
-  view.scanned = 0;
-  view.scanErrors = 0;
-  if (!todo.length) return renderDash();
-  let unsaved = 0;
-  const worker = async () => {
-    while (todo.length && episodeView === view) {
-      const it = todo.shift();
-      try {
-        it.info = await fetchInfo(`data/${view.split}/${view.task}/${it.name}/episode.mcap`);
-        if (++unsaved >= 100) { unsaved = 0; saveInfos(view); }
-        updateCard(view, it);
-      } catch (e) {
-        if (e instanceof AuthError) { todo.length = 0; return showGate(e.message); }
-        view.scanErrors++;
-        console.warn(it.name, e);
-      }
-      view.scanned++;
-      scheduleDash();
-    }
-  };
-  await Promise.all(Array.from({ length: INFO_PARALLEL }, worker));
-  if (episodeView !== view) return;
-  await saveInfos(view);
-  resetGrid(); // final order now that every recording time is known
-  renderDash();
+// ---------- per-episode info: precomputed index/<split>/<task>.json ----------
+// { "episode_<uuid>": { "start": ms, "duration": s, "operator": "<id>", "annotated": bool } }
+async function loadIndex(view) {
+  view.index = null;
+  try {
+    const r = await fetch(`index/${enc(view.split)}/${enc(view.task)}.json`, { cache: 'no-cache' });
+    if (!r.ok) return;
+    view.index = await r.json();
+  } catch { return; }
+  for (const it of view.items) {
+    const x = view.index[it.name];
+    if (!x) continue;
+    it.info = { start: +x.start || 0, duration: +x.duration || 0, operator: x.operator || '' };
+    if (x.annotated) it.annotated = true;
+  }
+  rankOperators(view.items);
 }
 
 // ---------- filtering + sorting ----------
@@ -406,8 +372,15 @@ const fmtDay = ms => new Date(ms).toLocaleDateString('sv-SE');
 const fmtStamp = ms => new Date(ms).toLocaleString('sv-SE', { dateStyle: 'short', timeStyle: 'short' });
 const opShort = op => op ? op.slice(0, 8) : '(없음)';
 const PALETTE = ['#4e79a7', '#f28e2b', '#59a14f', '#e15759', '#b07aa1', '#76b7b2', '#edc948', '#ff9da7', '#9c755f', '#3b8bd4', '#8cd17d', '#d37295'];
-const opColor = op => { if (!op) return '#9a9a9a'; let h = 0; for (const c of op) h = (h * 31 + c.charCodeAt(0)) >>> 0; return PALETTE[h % PALETTE.length]; };
-const isAnnotated = it => it.annotated || it.info?.inline;
+// Colors by user rank within the task (most episodes first), so the top users never share a color.
+let opRank = new Map();
+const opColor = op => { const i = op ? opRank.get(op) : undefined; return i === undefined || i >= PALETTE.length ? '#9a9a9a' : PALETTE[i]; };
+function rankOperators(items) {
+  const n = new Map();
+  for (const it of items) if (it.info?.operator) n.set(it.info.operator, (n.get(it.info.operator) || 0) + 1);
+  opRank = new Map([...n].sort((a, b) => b[1] - a[1]).map(([op], i) => [op, i]));
+}
+const isAnnotated = it => !!it.annotated;
 
 const EP_SORTS = {
   'date-desc': [it => it.info?.start, -1], 'date-asc': [it => it.info?.start, 1],
@@ -452,10 +425,6 @@ function resetGrid() {
 function cardMeta(it) {
   const i = it.info;
   return `<i style="--c:${i ? opColor(i.operator) : 'var(--line)'}"></i><span>${i?.start ? fmtStamp(i.start) : '…'}</span><span>${i ? esc(opShort(i.operator)) : ''}</span>${isAnnotated(it) ? '<em>ann</em>' : ''}`;
-}
-function updateCard(view, it) {
-  const el = view.cards.get(it.name);
-  if (el) el.querySelector('.meta').innerHTML = cardMeta(it);
 }
 
 function renderMoreEpisodes() {
@@ -513,17 +482,16 @@ function renderDash() {
   $('dash-kpis').innerHTML = kpi.map(([k, x]) => `<div><b>${x}</b><span>${k}</span></div>`).join('');
   $('dash-reset').classList.toggle('hidden', !(f.from != null || f.ops.size));
   $('dash-range').textContent = f.from != null ? `${fmtDay(f.from)}${f.to - f.from > DAY ? ' – ' + fmtDay(f.to - 1) : ''}` : '';
-  const remaining = (v.scanTotal || 0) - (v.scanned || 0);
-  $('dash-progress').textContent = remaining > 0 && episodeView === v
-    ? `녹화 정보 읽는 중 ${fmt(v.scanned)} / ${fmt(v.scanTotal)} — 차트·정렬은 읽은 것까지 반영돼요 (다음부터는 캐시)`
-    : v.scanErrors ? `${fmt(v.scanErrors)}개 에피소드는 정보를 못 읽었어요` : '';
+  const missing = all.length - all.filter(it => it.info).length;
+  $('dash-progress').textContent = !v.index ? `인덱스 없음 (index/${v.split}/${v.task}.json)`
+    : missing ? `${fmt(missing)}개 에피소드는 인덱스에 없어요` : '';
   drawHistogram(v, known);
   drawOperators(v);
 }
 
 function drawHistogram(v, known) {
   const box = $('dash-hist');
-  if (!known.length) { box.innerHTML = `<p class="hint">${v.scanTotal ? '…' : '녹화 시간 정보 없음'}</p>`; return; }
+  if (!known.length) { box.innerHTML = '<p class="hint">녹화 시간 정보 없음</p>'; return; }
   const times = known.map(it => it.info.start);
   const lo = times.reduce((x, y) => Math.min(x, y)), hi = times.reduce((x, y) => Math.max(x, y));
   const weekly = (hi - lo) / DAY > 180;
@@ -616,8 +584,8 @@ function drawOperators(v) {
   const max = Math.max(1e-9, ...list.map(r => r.v));
   $('dash-ops-note').textContent = list.length ? `${fmt(list.length)}명 · 클릭해서 필터 (여러 명 가능)` : '';
   const sel = v.filter.ops;
-  $('dash-ops').innerHTML = list.length ? list.map(r => `<button class="op${sel.size ? sel.has(r.op) ? ' on' : ' off' : ''}" data-op="${esc(r.op)}" style="--c:${opColor(r.op)};--w:${(100 * r.v / max).toFixed(1)}%" title="${esc(r.op || '(operator_id 없음)')}\n${fmt(r.n)} ep · ${r.h.toFixed(2)} h${r.last ? '\n마지막 녹화 ' + fmtStamp(r.last) : ''}"><i></i><code>${esc(opShort(r.op))}</code><span>${fmt(r.n)} ep · ${r.h.toFixed(1)} h</span></button>`).join('')
-    : `<p class="hint">${v.scanTotal ? '…' : '유저 정보 없음'}</p>`;
+  $('dash-ops').innerHTML = list.length ? list.map(r => `<button class="op${sel.size ? sel.has(r.op) ? ' on' : ' off' : ''}" data-op="${esc(r.op)}" style="--c:${opColor(r.op)};--w:${(100 * r.v / max).toFixed(1)}%" title="${esc(r.op || '(operator_id 없음)')}\n${fmt(r.n)} ep · ${r.h.toFixed(2)} h${r.last ? '\n마지막 녹화 ' + fmtStamp(r.last) : ''}"><i></i><code>${esc(opShort(r.op))}</code><span>${fmt(r.n)} ep · ${r.h < 1 ? Math.round(r.h * 60) + ' min' : r.h.toFixed(1) + ' h'}</span></button>`).join('')
+    : '<p class="hint">유저 정보 없음</p>';
   $('dash-ops').querySelectorAll('.op').forEach(b => b.onclick = e => {
     const op = b.dataset.op;
     if (e.metaKey || e.ctrlKey || e.shiftKey || sel.size) { sel.has(op) ? sel.delete(op) : sel.add(op); }

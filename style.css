@@ -163,7 +163,7 @@ main { padding: 16px; max-width: 1600px; margin: 0 auto; }
 .op.on code { font-weight: 700; }
 #dash-progress { margin: 8px 0 0; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 #dash-progress:empty { display: none; }
-.ep .meta { display: flex; gap: 6px; align-items: center; padding: 0 8px 7px; margin-top: -3px; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.ep .meta { display: flex; flex-wrap: wrap; gap: 2px 6px; align-items: center; white-space: nowrap; padding: 0 8px 7px; margin-top: -3px; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
 .ep .meta i { width: 8px; height: 8px; border-radius: 2px; background: var(--c, var(--line)); flex: none; }
 .ep .meta em { margin-left: auto; font-style: normal; padding: 0 5px; border-radius: 4px; background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent); }
 @media (max-width: 900px) { .dash-body { grid-template-columns: 1fr; } .dash-tools { margin-left: 0; } }
