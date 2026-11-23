@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="ko">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -12,7 +12,7 @@
 <div id="gate" class="hidden">
   <form id="gate-form">
     <input id="gate-token" type="password" placeholder="hf_…" autocomplete="off" spellcheck="false">
-    <button>저장</button>
+    <button>Save</button>
     <p id="gate-error"></p>
   </form>
 </div>
@@ -20,7 +20,7 @@
   <a href="#/" class="brand">ABC-130k</a>
   <nav id="splits"></nav>
   <div class="tools">
-    <input id="search" type="search" placeholder="검색">
+    <input id="search" type="search" placeholder="Search">
     <select id="sort">
       <option value="hours">hours</option>
       <option value="episodes">episodes</option>
@@ -30,8 +30,8 @@
       <option value="last">latest recording</option>
       <option value="name">name</option>
     </select>
-    <button id="view-toggle" title="표 / 그리드"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg></button>
-    <button id="logout" title="토큰 삭제"><svg viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></svg></button>
+    <button id="view-toggle" title="Table / grid"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg></button>
+    <button id="logout" title="Forget token"><svg viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></svg></button>
   </div>
 </header>
 <main id="main" class="hidden">
@@ -50,26 +50,26 @@
         <div id="dash-kpis"></div>
         <div class="dash-tools">
           <div class="segmented" id="dash-metric"><button data-m="episodes" class="on">episodes</button><button data-m="hours">hours</button></div>
-          <select id="ep-sort" title="에피소드 정렬">
-            <option value="date-desc">녹화일 ↓ 최신순</option>
-            <option value="date-asc">녹화일 ↑ 오래된순</option>
-            <option value="op">유저순</option>
-            <option value="dur-desc">길이 ↓</option>
-            <option value="dur-asc">길이 ↑</option>
+          <select id="ep-sort" title="Sort episodes">
+            <option value="date-desc">Recorded ↓ newest</option>
+            <option value="date-asc">Recorded ↑ oldest</option>
+            <option value="op">User</option>
+            <option value="dur-desc">Duration ↓</option>
+            <option value="dur-asc">Duration ↑</option>
             <option value="name">ID</option>
           </select>
           <label class="check"><input type="checkbox" id="ep-annotated"> annotated</label>
-          <button id="dash-reset" class="hidden">필터 해제</button>
+          <button id="dash-reset" class="hidden">Clear filters</button>
         </div>
       </div>
       <div class="dash-body">
         <figure class="panel">
-          <figcaption><b>날짜별 녹화량</b><span id="dash-range"></span></figcaption>
+          <figcaption><b>Recordings per day</b><span id="dash-range"></span></figcaption>
           <div id="dash-hist"></div>
-          <p class="hint">드래그해서 기간 선택 · 막대 클릭 = 하루 · 더블클릭 = 해제</p>
+          <p class="hint">Drag to select a range · click a bar = one day · double-click = clear</p>
         </figure>
         <figure class="panel">
-          <figcaption><b>유저별</b><span id="dash-ops-note"></span></figcaption>
+          <figcaption><b>By user</b><span id="dash-ops-note"></span></figcaption>
           <div id="dash-ops"></div>
         </figure>
       </div>
@@ -90,9 +90,9 @@
     </div>
     <div class="pv-actions">
       <span id="pv-status"></span>
-      <button id="pv-prev" title="이전 (↑)">↑</button>
-      <button id="pv-next" title="다음 (↓)">↓</button>
-      <button id="pv-close" title="닫기 (Esc)">✕</button>
+      <button id="pv-prev" title="Previous (↑)">↑</button>
+      <button id="pv-next" title="Next (↓)">↓</button>
+      <button id="pv-close" title="Close (Esc)">✕</button>
     </div>
   </div>
   <div id="pv-cams"></div>
