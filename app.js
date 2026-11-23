@@ -273,8 +273,10 @@ async function countEpisodes(data) {
 // ---------- rendering ----------
 const msg = t => { $('message').textContent = t || ''; };
 
-function renderNav(active) {
-  $('splits').innerHTML = state.splits.map(s => `<a href="#/${esc(s)}" class="${s === active ? 'active' : ''}">${esc(s)}</a>`).join('');
+function renderNav(active, users = false) {
+  const pre = users ? '#/users/' : '#/';
+  $('splits').innerHTML = state.splits.map(s => `<a href="${pre}${esc(s)}" class="${s === active ? 'active' : ''}">${esc(s)}</a>`).join('')
+    + `<span class="modes"><a href="#/${esc(active)}" class="${users ? '' : 'on'}">tasks</a><a href="#/users/${esc(active)}" class="${users ? 'on' : ''}">users</a></span>`;
 }
 
 function renderStats(data) {
@@ -334,7 +336,7 @@ function setSort(k, data) {
 }
 
 let episodeView = null;
-async function renderTask(split, task) {
+async function renderTask(split, task, user) {
   const data = await loadSplit(split);
   const t = data.tasks.find(x => x.name === task) || { name: task };
   $('task-title').textContent = label(task);
@@ -343,7 +345,7 @@ async function renderTask(split, task) {
   $('task-meta').textContent = meta();
   $('episodes').innerHTML = '';
   $('dash').classList.add('hidden');
-  const view = episodeView = { split, task, items: [], shown: 0, list: [], cards: new Map(), filter: { from: null, to: null, ops: new Set() }, index: null };
+  const view = episodeView = { split, task, items: [], shown: 0, list: [], cards: new Map(), filter: { from: null, to: null, ops: new Set(user ? [user] : []) }, index: null };
   $('ep-annotated').checked = false;
   msg('…');
   const index = await fetchIndex(split, task);
@@ -387,7 +389,7 @@ const dayStart = ms => { const d = new Date(ms); d.setHours(0, 0, 0, 0); return 
 const weekStart = ms => { const d = new Date(dayStart(ms)); d.setDate(d.getDate() - (d.getDay() + 6) % 7); return d.getTime(); };
 const fmtDay = ms => new Date(ms).toLocaleDateString('sv-SE');
 const fmtStamp = ms => new Date(ms).toLocaleString('sv-SE', { dateStyle: 'short', timeStyle: 'short' });
-const opShort = op => op ? op.slice(0, 8) : '(없음)';
+const opShort = op => op ? `${op.slice(0, 8)}…${op.slice(-4)}` : '(없음)';
 const PALETTE = ['#4e79a7', '#f28e2b', '#59a14f', '#e15759', '#b07aa1', '#76b7b2', '#edc948', '#ff9da7', '#9c755f', '#3b8bd4', '#8cd17d', '#d37295'];
 // Colors by user rank within the task (most episodes first), so the top users never share a color.
 let opRank = new Map();
@@ -599,8 +601,10 @@ function drawOperators(v) {
   const list = [...rows.values()].sort((a, b) => b.v - a.v);
   for (const op of v.filter.ops) if (!rows.has(op)) list.push({ op, v: 0, n: 0, h: 0, last: 0 });
   const max = Math.max(1e-9, ...list.map(r => r.v));
-  $('dash-ops-note').textContent = list.length ? `${fmt(list.length)}명 · 클릭해서 필터 (여러 명 가능)` : '';
   const sel = v.filter.ops;
+  const one = sel.size === 1 ? [...sel][0] : null;
+  $('dash-ops-note').innerHTML = !list.length ? '' : one ? `<a href="#/users/${esc(v.split)}/${encodeURIComponent(one)}">${esc(opShort(one))} 유저 페이지 →</a>`
+    : `${fmt(list.length)}명 · 클릭해서 필터 (여러 명 가능)`;
   $('dash-ops').innerHTML = list.length ? list.map(r => `<button class="op${sel.size ? sel.has(r.op) ? ' on' : ' off' : ''}" data-op="${esc(r.op)}" style="--c:${opColor(r.op)};--w:${(100 * r.v / max).toFixed(1)}%" title="${esc(r.op || '(operator_id 없음)')}\n${fmt(r.n)} ep · ${r.h.toFixed(2)} h${r.last ? '\n마지막 녹화 ' + fmtStamp(r.last) : ''}"><i></i><code>${esc(opShort(r.op))}</code><span>${fmt(r.n)} ep · ${r.h < 1 ? Math.round(r.h * 60) + ' min' : r.h.toFixed(1) + ' h'}</span></button>`).join('')
     : '<p class="hint">유저 정보 없음</p>';
   $('dash-ops').querySelectorAll('.op').forEach(b => b.onclick = e => {
@@ -643,21 +647,134 @@ function openEpisodeAt(items, i) {
   });
 }
 
+// ---------- users: index/users.json (tools/build_index.py merge) ----------
+// { split: { operator: { e, h, a, days, f, l, t: { task: [episodes, hours, annotated, first, last] }, daily: { 'YYYY-MM-DD' (UTC): hours } } } }
+let usersP = null;
+const loadUsers = () => usersP ??= fetch('index/users.json', { cache: 'no-cache' }).then(r => r.ok ? r.json() : null).catch(() => null);
+const fmtH = h => h < 1 ? `${Math.round(h * 60)} min` : h < 10 ? h.toFixed(1) + ' h' : Math.round(h) + ' h';
+const pct = x => x == null ? '–' : x < .01 && x > 0 ? '<1%' : Math.round(100 * x) + '%';
+const usort = { users: ls.get('usort') || 'h', user: 'h', dir: -1 };
+const sortTh = (k, l, cur, cls = '') => `<th data-k="${k}" class="${cls}${cur === k ? ' on' : ''}">${l}</th>`;
+const kpis = cells => `<div class="ukpis">${cells.map(([k, v]) => `<div><b>${v}</b><span>${k}</span></div>`).join('')}</div>`;
+
+async function renderUsers(split) {
+  const box = $('users');
+  const U = (await loadUsers())?.[split];
+  if (!U || !Object.keys(U).length) { box.innerHTML = `<p class="hint">${esc(split)}에는 유저 정보가 없어요 (index/users.json).</p>`; msg(''); return; }
+  const q = $('search').value.trim().toLowerCase();
+  const all = Object.entries(U).map(([op, u]) => ({ op, ...u, n: Object.keys(u.t).length, hpd: u.h / u.days, ann: u.e ? u.a / u.e : 0, span: (u.l - u.f) / DAY }));
+  const total = all.reduce((a, r) => a + r.h, 0);
+  const byH = [...all].sort((a, b) => b.h - a.h); byH.forEach((r, i) => { r.rank = i + 1; });
+  const top = k => byH.slice(0, k).reduce((a, r) => a + r.h, 0) / total;
+  const rows = all.filter(r => !q || r.op.toLowerCase().includes(q) || opShort(r.op).toLowerCase().includes(q) || Object.keys(r.t).some(t => label(t).toLowerCase().includes(q)));
+  const key = { h: r => r.h, e: r => r.e, n: r => r.n, days: r => r.days, hpd: r => r.hpd, ann: r => r.ann, f: r => r.f, l: r => r.l, span: r => r.span, op: r => r.op }[usort.users] || (r => r.h);
+  rows.sort((a, b) => { const x = key(a), y = key(b); return (x < y ? -1 : x > y ? 1 : 0) * (usort.users === 'op' ? 1 : usort.dir); });
+  const maxH = byH[0].h;
+  box.innerHTML = kpis([['users', fmt(all.length)], ['hours', total.toFixed(0)], ['top 10 share', pct(top(10))], ['top 20 share', pct(top(20))], ['median hours / user', fmtH(byH[Math.floor(byH.length / 2)].h)]])
+    + `<div class="scroll"><table class="tbl"><thead><tr><th>#</th>${sortTh('op', 'user', usort.users, 'l')}${sortTh('h', 'hours', usort.users)}<th>share</th>${sortTh('e', 'episodes', usort.users)}${sortTh('n', 'tasks', usort.users)}${sortTh('days', 'days', usort.users)}${sortTh('hpd', 'h / day', usort.users)}${sortTh('ann', 'annotated', usort.users)}${sortTh('f', 'first', usort.users)}${sortTh('l', 'last', usort.users)}${sortTh('span', 'span', usort.users)}<th class="l grow">top tasks</th></tr></thead><tbody>`
+    + rows.map(r => {
+      const tops = Object.entries(r.t).sort((a, b) => b[1][1] - a[1][1]).slice(0, 3).map(([t, x]) => `${esc(label(t))} <small>${pct(x[1] / r.h)}</small>`).join(' · ');
+      return `<tr data-op="${esc(r.op)}"><td class="muted">${r.rank}</td><td class="l"><code>${esc(opShort(r.op))}</code></td><td>${fmtH(r.h)}<span class="hbar"><i style="--w:${(100 * r.h / maxH).toFixed(1)}%"></i></span></td><td>${pct(r.h / total)}</td><td>${fmt(r.e)}</td><td>${r.n}</td><td>${r.days}</td><td>${r.hpd.toFixed(1)}</td><td>${pct(r.ann)}</td><td>${fmtDay(r.f)}</td><td>${fmtDay(r.l)}</td><td>${Math.round(r.span)}d</td><td class="l grow small">${tops}</td></tr>`;
+    }).join('') + '</tbody></table></div>';
+  box.querySelectorAll('th[data-k]').forEach(h => h.onclick = () => {
+    if (usort.users === h.dataset.k) usort.dir = -usort.dir; else { usort.users = h.dataset.k; usort.dir = -1; ls.set('usort', usort.users); }
+    renderUsers(split);
+  });
+  box.querySelectorAll('tr[data-op]').forEach(tr => tr.onclick = () => { location.hash = `#/users/${split}/${encodeURIComponent(tr.dataset.op)}`; });
+  msg(rows.length ? '' : '—');
+}
+
+async function renderUser(split, op) {
+  const box = $('users');
+  const [Us, sum] = await Promise.all([loadUsers(), loadSummary()]);
+  const U = Us?.[split] || {}, u = U[op];
+  if (!u) { box.innerHTML = `<p class="hint">유저 ${esc(op)} 를 ${esc(split)}에서 찾지 못했어요.</p>`; return; }
+  const rank = Object.values(U).filter(x => x.h > u.h).length + 1;
+  const T = sum?.splits?.[split] || {};
+  const q = $('search').value.trim().toLowerCase();
+  const rows = Object.entries(u.t).map(([t, x]) => ({ t, e: x[0], h: x[1], a: x[2], f: x[3], l: x[4], ofUser: x[1] / u.h, ofTask: T[t]?.hours ? x[1] / T[t].hours : null, taskUsers: T[t]?.operators }))
+    .filter(r => !q || label(r.t).toLowerCase().includes(q));
+  const key = { t: r => r.t, e: r => r.e, h: r => r.h, ofTask: r => r.ofTask ?? -1, a: r => r.e ? r.a / r.e : 0, f: r => r.f, l: r => r.l }[usort.user] || (r => r.h);
+  rows.sort((a, b) => { const x = key(a), y = key(b); return (x < y ? -1 : x > y ? 1 : 0) * (usort.user === 't' ? 1 : usort.dir); });
+  const eff = 1 / Object.values(u.t).reduce((a, x) => a + (x[1] / u.h) ** 2, 0);
+  const maxH = Math.max(...rows.map(r => r.h), 1e-9);
+  box.innerHTML = `<div class="task-head"><a href="#/users/${esc(split)}" class="back">←</a><h1><code>${esc(opShort(op))}</code></h1><span class="muted">#${rank} / ${Object.keys(U).length} · <code class="full">${esc(op)}</code></span></div>`
+    + kpis([['hours', fmtH(u.h)], ['episodes', fmt(u.e)], ['tasks', Object.keys(u.t).length], ['effective tasks', eff.toFixed(1)], ['days', u.days], ['h / day', (u.h / u.days).toFixed(1)], ['annotated', pct(u.a / u.e)], ['period', `${fmtDay(u.f)} – ${fmtDay(u.l)}`]])
+    + `<figure class="panel"><figcaption><b>날짜별 녹화시간</b><span id="u-range"></span></figcaption><div id="u-daily"></div><p class="hint">UTC 기준 · 막대에 마우스를 올리면 그날 시간</p></figure>`
+    + `<div class="scroll"><table class="tbl utasks"><thead><tr>${sortTh('t', 'task', usort.user, 'l grow')}${sortTh('e', 'episodes', usort.user)}${sortTh('h', 'hours', usort.user)}<th title="이 유저 전체 시간 중 이 태스크">of user</th>${sortTh('ofTask', 'of task', usort.user)}<th title="이 태스크를 한 유저 수">task users</th>${sortTh('a', 'annotated', usort.user)}${sortTh('f', 'first', usort.user)}${sortTh('l', 'last', usort.user)}</tr></thead><tbody>`
+    + rows.map(r => `<tr data-t="${esc(r.t)}"><td class="l grow">${esc(label(r.t))}</td><td>${fmt(r.e)}</td><td>${fmtH(r.h)}<span class="hbar"><i style="--w:${(100 * r.h / maxH).toFixed(1)}%"></i></span></td><td>${pct(r.ofUser)}</td><td title="이 태스크 전체 시간 중 이 유저">${pct(r.ofTask)}</td><td>${r.taskUsers ?? '–'}</td><td>${pct(r.e ? r.a / r.e : null)}</td><td>${fmtDay(r.f)}</td><td>${fmtDay(r.l)}</td></tr>`).join('')
+    + '</tbody></table></div><p class="hint">태스크를 누르면 이 유저로 필터된 에피소드 목록이 열려요.</p>';
+  box.querySelectorAll('th[data-k]').forEach(h => h.onclick = () => { if (usort.user === h.dataset.k) usort.dir = -usort.dir; else { usort.user = h.dataset.k; usort.dir = -1; } renderUser(split, op); });
+  box.querySelectorAll('tr[data-t]').forEach(tr => tr.onclick = () => { location.hash = `#/${split}/${encodeURIComponent(tr.dataset.t)}?u=${encodeURIComponent(op)}`; });
+  drawDaily(u.daily);
+  msg('');
+}
+
+// Hours per UTC day (per week when the span is long), with a hover tooltip.
+function drawDaily(daily) {
+  const el = $('u-daily'); if (!el) return;
+  const days = Object.keys(daily).sort(); if (!days.length) return;
+  const t0 = Date.parse(days[0] + 'T00:00:00Z'), t1 = Date.parse(days.at(-1) + 'T00:00:00Z');
+  const weekly = (t1 - t0) / DAY > 150, step = weekly ? 7 * DAY : DAY;
+  const bins = new Map();
+  for (const d of days) { const t = Date.parse(d + 'T00:00:00Z'), k = t0 + Math.floor((t - t0) / step) * step; bins.set(k, (bins.get(k) || 0) + daily[d]); }
+  const n = Math.floor((t1 - t0) / step) + 1, W = el.clientWidth || 800, Hh = 160, pad = 28, bw = Math.max(1, (W - pad) / n);
+  const max = Math.max(...bins.values());
+  const y = v => Hh - 18 - (Hh - 26) * v / max;
+  let bars = '', labels = '';
+  for (let i = 0; i < n; i++) {
+    const k = t0 + i * step, v = bins.get(k) || 0;
+    if (v) bars += `<rect class="b" x="${pad + i * bw + (bw > 3 ? 1 : 0)}" y="${y(v)}" width="${Math.max(1, bw - (bw > 3 ? 2 : 0))}" height="${Hh - 18 - y(v)}" rx="${bw > 6 ? 2 : 0}" data-t="${k}" data-v="${v}"/>`;
+  }
+  let lastM = '';
+  for (let i = 0; i < n; i++) {
+    const d = new Date(t0 + i * step), m = d.toISOString().slice(0, 7);
+    if (m !== lastM) { if (lastM || i === 0) labels += `<text class="axis" x="${pad + i * bw}" y="${Hh - 4}">${m}</text>`; lastM = m; }
+  }
+  const grid = [0.5, 1].map(f => `<line class="grid-l" x1="${pad}" x2="${W}" y1="${y(max * f)}" y2="${y(max * f)}"/><text class="axis" x="0" y="${y(max * f) + 3}">${fmtH(max * f)}</text>`).join('');
+  el.innerHTML = `<svg viewBox="0 0 ${W} ${Hh}" preserveAspectRatio="none">${grid}${bars}${labels}</svg><div class="tip hidden"></div>`;
+  $('u-range').textContent = `${days.length}일 · ${weekly ? '주 단위' : '일 단위'}`;
+  const tip = el.querySelector('.tip');
+  el.querySelectorAll('rect.b').forEach(r => {
+    r.onmouseenter = () => {
+      const t = +r.dataset.t, d = new Date(t).toISOString().slice(0, 10);
+      tip.innerHTML = `<b>${weekly ? d + ' 주' : d}</b> · ${fmtH(+r.dataset.v)}`;
+      tip.classList.remove('hidden');
+      const bx = r.getBoundingClientRect(), ex = el.getBoundingClientRect();
+      tip.style.left = Math.min(ex.width - 140, Math.max(0, bx.left - ex.left - 40)) + 'px'; tip.style.top = Math.max(0, bx.top - ex.top - 34) + 'px';
+    };
+    r.onmouseleave = () => tip.classList.add('hidden');
+  });
+}
+
 // ---------- routing ----------
 async function route() {
   if (!token) return showGate();
-  const [split, task] = location.hash.replace(/^#\/?/, '').split('/').map(decodeURIComponent);
+  const [path, query] = location.hash.replace(/^#\/?/, '').split('?');
+  const parts = path.split('/').map(decodeURIComponent);
+  const users = parts[0] === 'users';
+  const [split, task] = users ? parts.slice(1) : parts;
   try {
     const splits = await loadSplits();
-    if (!split || !splits.includes(split)) { location.replace('#/' + splits[0]); return; }
-    renderNav(split);
+    if (!split || !splits.includes(split)) { location.replace((users ? '#/users/' : '#/') + splits[0]); return; }
+    renderNav(split, users);
+    $('users').classList.toggle('hidden', !users);
+    $('view-toggle').classList.toggle('hidden', users);
+    if (users) {
+      episodeView = null;
+      for (const id of ['tasks', 'stats', 'task', 'sort']) $(id).classList.add('hidden');
+      await (task ? renderUser(split, task) : renderUsers(split));
+      if (task) scrollTo(0, 0);
+      return;
+    }
+    $('view-toggle').classList.remove('hidden');
     const data = await loadSplit(split);
     renderStats(data);
     $('tasks').classList.toggle('hidden', !!task);
     $('stats').classList.toggle('hidden', !!task);
     $('task').classList.toggle('hidden', !task);
     $('sort').classList.toggle('hidden', !!task || state.view === 'table');
-    if (task) { await renderTask(split, task); scrollTo(0, 0); }
+    if (task) { await renderTask(split, task, new URLSearchParams(query || '').get('u')); scrollTo(0, 0); }
     else { episodeView = null; renderTasks(data); countEpisodes(data); }
   } catch (e) {
     if (e instanceof AuthError) showGate(e.message); else msg(e.message);
@@ -707,6 +824,7 @@ $('search').oninput = () => {
   clearTimeout(searchTimer);
   searchTimer = setTimeout(() => {
     if (episodeView) applyFilter();
+    else if (location.hash.startsWith('#/users/')) route();
     else { const split = location.hash.split('/')[1]; if (state.data[split]) renderTasks(state.data[split]); }
   }, 200);
 };

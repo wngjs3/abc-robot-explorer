@@ -265,6 +265,28 @@ def merge(args):
             'first': min((v['start'] for v in known), default=None), 'last': max((v['start'] for v in known), default=None),
             'days': len(days), 'cover': min(eps)}
     with open(out / 'summary.json', 'w') as f: json.dump(summary, f, separators=(',', ':'))
+    # Per-user stats across tasks: index/users.json
+    #   { split: { operator: { e, h, a, days, f, l, t: { task: [episodes, hours, annotated, first, last] },
+    #                         daily: { "YYYY-MM-DD" (UTC): hours } } } }
+    users = {}
+    for (sp, task), eps in sorted(by_task.items()):
+        for v in eps.values():
+            if 'start' not in v or not v['operator']: continue
+            u = users.setdefault(sp, {}).setdefault(v['operator'], {'e': 0, 'h': 0.0, 'a': 0, 'f': v['start'], 'l': v['start'], 't': {}, 'daily': defaultdict(float)})
+            h = v['duration'] / 3600
+            u['e'] += 1; u['h'] += h; u['a'] += v['annotated']; u['f'] = min(u['f'], v['start']); u['l'] = max(u['l'], v['start'])
+            t = u['t'].setdefault(task, [0, 0.0, 0, v['start'], v['start']])
+            t[0] += 1; t[1] += h; t[2] += v['annotated']; t[3] = min(t[3], v['start']); t[4] = max(t[4], v['start'])
+            u['daily'][time.strftime('%Y-%m-%d', time.gmtime(v['start'] / 1000))] += h
+    for sp in users.values():
+        for u in sp.values():
+            u['h'] = round(u['h'], 3); u['days'] = len(u['daily'])
+            u['daily'] = {d: round(x, 3) for d, x in sorted(u['daily'].items())}
+            for t in u['t'].values(): t[1] = round(t[1], 3)
+    with open(out / 'users.json', 'w') as f: json.dump(users, f, separators=(',', ':'))
+    for sp, us in users.items():
+        short = Counter(k[:8] + k[-4:] for k in us)  # the app shows users as <first 8>…<last 4>
+        if any(n > 1 for n in short.values()): print(f'  WARNING: {sp} has users the app cannot tell apart')
     tot = sum(len(v) for v in by_task.values())
     print(f'MERGE DONE {len(by_task)} tasks, {tot} episodes, {tot - sum(missing.values())} with metadata, {sum(missing.values())} missing')
     for k, v in missing.most_common(10): print('  missing', k, v)

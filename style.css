@@ -178,3 +178,39 @@ main { padding: 16px; max-width: 1600px; margin: 0 auto; }
 #pv-subtasks .seg.alt { background: color-mix(in srgb, var(--accent) 12%, transparent); }
 #pv-subtasks .seg.on { background: var(--accent); color: #fff; }
 #pv-subtasks .seg span { display: block; overflow: hidden; text-overflow: ellipsis; }
+
+/* ---------- users ---------- */
+.modes { display: inline-flex; margin-left: 10px; padding-left: 12px; border-left: 1px solid var(--line); gap: 4px; }
+#splits .modes a { color: var(--muted); }
+#splits .modes a.on { background: var(--accent); color: #fff; }
+.muted { color: var(--muted); }
+.ukpis { display: flex; gap: 24px; flex-wrap: wrap; margin: 4px 0 14px; }
+.ukpis div { display: flex; flex-direction: column; }
+.ukpis b { font-size: 20px; font-variant-numeric: tabular-nums; }
+.ukpis span { color: var(--muted); font-size: 12px; }
+#users .task-head .back { font-size: 18px; color: var(--muted); }
+#users .task-head h1 code { font-size: 20px; }
+#users code.full { font-size: 11px; }
+#users .panel { margin-bottom: 12px; }
+#u-daily { position: relative; height: 160px; }
+#u-daily svg { display: block; width: 100%; height: 100%; overflow: visible; }
+#u-daily .b { fill: var(--accent); }
+#u-daily .b:hover { fill: var(--text); }
+#u-daily .axis { fill: var(--muted); font-size: 10px; }
+#u-daily .grid-l { stroke: var(--line); }
+.scroll { overflow-x: auto; }
+.tbl { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--line); }
+.tbl th, .tbl td { padding: 6px 10px; border-bottom: 1px solid var(--line); text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.tbl th { color: var(--muted); font-weight: 500; font-size: 12px; user-select: none; }
+.tbl th[data-k] { cursor: pointer; }
+.tbl th.on { color: var(--text); }
+.tbl .l { text-align: left; }
+.tbl .grow { width: 100%; white-space: normal; min-width: 220px; }
+.tbl .small { font-size: 12px; color: var(--muted); }
+.tbl small { color: var(--muted); }
+.tbl tbody tr { cursor: pointer; }
+.tbl tbody tr:hover { background: var(--bg); }
+.hbar { display: inline-block; position: relative; width: 60px; height: 5px; margin-left: 8px; border-radius: 3px; background: var(--skeleton); vertical-align: middle; overflow: hidden; }
+.hbar i { position: absolute; left: 0; top: 0; bottom: 0; width: var(--w); background: var(--accent); }
+#dash-ops-note a { color: var(--accent); }
+@media (max-width: 640px) { .modes { margin-left: 0; padding-left: 0; border-left: 0; } .hbar { display: none; } }
