@@ -336,7 +336,7 @@ function setSort(k, data) {
 }
 
 let episodeView = null;
-async function renderTask(split, task, user) {
+async function renderTask(split, task, user, day, ndays = 1) {
   const data = await loadSplit(split);
   const t = data.tasks.find(x => x.name === task) || { name: task };
   $('task-title').textContent = label(task);
@@ -345,7 +345,7 @@ async function renderTask(split, task, user) {
   $('task-meta').textContent = meta();
   $('episodes').innerHTML = '';
   $('dash').classList.add('hidden');
-  const view = episodeView = { split, task, items: [], shown: 0, list: [], cards: new Map(), filter: { from: null, to: null, ops: new Set(user ? [user] : []) }, index: null };
+  const view = episodeView = { split, task, items: [], shown: 0, list: [], cards: new Map(), filter: { from: day ? Date.parse(day + 'T00:00:00Z') : null, to: day ? Date.parse(day + 'T00:00:00Z') + ndays * DAY : null, ops: new Set(user ? [user] : []) }, index: null };
   $('ep-annotated').checked = false;
   msg('…');
   const index = await fetchIndex(split, task);
@@ -700,50 +700,92 @@ async function renderUser(split, op) {
   const maxH = Math.max(...rows.map(r => r.h), 1e-9);
   box.innerHTML = `<div class="task-head"><a href="#/users/${esc(split)}" class="back">←</a><h1><code>${esc(opShort(op))}</code></h1><span class="muted">#${rank} / ${Object.keys(U).length} · <code class="full">${esc(op)}</code></span></div>`
     + kpis([['hours', fmtH(u.h)], ['episodes', fmt(u.e)], ['tasks', Object.keys(u.t).length], ['effective tasks', eff.toFixed(1)], ['days', u.days], ['h / day', (u.h / u.days).toFixed(1)], ['annotated', pct(u.a / u.e)], ['period', `${fmtDay(u.f)} – ${fmtDay(u.l)}`]])
-    + `<figure class="panel"><figcaption><b>날짜별 녹화시간</b><span id="u-range"></span></figcaption><div id="u-daily"></div><p class="hint">UTC 기준 · 막대에 마우스를 올리면 그날 시간</p></figure>`
-    + `<div class="scroll"><table class="tbl utasks"><thead><tr>${sortTh('t', 'task', usort.user, 'l grow')}${sortTh('e', 'episodes', usort.user)}${sortTh('h', 'hours', usort.user)}<th title="이 유저 전체 시간 중 이 태스크">of user</th>${sortTh('ofTask', 'of task', usort.user)}<th title="이 태스크를 한 유저 수">task users</th>${sortTh('a', 'annotated', usort.user)}${sortTh('f', 'first', usort.user)}${sortTh('l', 'last', usort.user)}</tr></thead><tbody>`
-    + rows.map(r => `<tr data-t="${esc(r.t)}"><td class="l grow">${esc(label(r.t))}</td><td>${fmt(r.e)}</td><td>${fmtH(r.h)}<span class="hbar"><i style="--w:${(100 * r.h / maxH).toFixed(1)}%"></i></span></td><td>${pct(r.ofUser)}</td><td title="이 태스크 전체 시간 중 이 유저">${pct(r.ofTask)}</td><td>${r.taskUsers ?? '–'}</td><td>${pct(r.e ? r.a / r.e : null)}</td><td>${fmtDay(r.f)}</td><td>${fmtDay(r.l)}</td></tr>`).join('')
+    + `<figure class="panel"><figcaption><b>날짜별 녹화시간 · 태스크별 색</b><span id="u-range"></span></figcaption><div id="u-daily"></div><div id="u-legend"></div><p class="hint">UTC 기준 · 막대 하나 = 하루(기간이 500일 넘으면 한 주) · 한 색이면 그날 한 태스크만 · 막대를 누르면 아래에 그날 태스크</p><div id="u-day" data-split="${esc(split)}" data-op="${esc(op)}"></div></figure>`
+    + `<div class="scroll"><table class="tbl utasks"><thead><tr>${sortTh('t', 'task', usort.user, 'l grow')}${sortTh('e', 'episodes', usort.user)}${sortTh('h', 'hours', usort.user)}<th title="이 유저의 전체 녹화시간 중 이 태스크가 차지하는 비율">유저 시간 중</th>${sortTh('ofTask', '태스크 시간 중', usort.user)}<th title="이 태스크를 녹화한 유저 수">태스크 유저 수</th>${sortTh('a', 'annotated', usort.user)}${sortTh('f', 'first', usort.user)}${sortTh('l', 'last', usort.user)}</tr></thead><tbody>`
+    + rows.map(r => `<tr data-t="${esc(r.t)}"><td class="l grow">${esc(label(r.t))}</td><td>${fmt(r.e)}</td><td>${fmtH(r.h)}<span class="hbar"><i style="--w:${(100 * r.h / maxH).toFixed(1)}%"></i></span></td><td>${pct(r.ofUser)}</td><td title="이 태스크의 전체 녹화시간 중 이 유저가 녹화한 비율">${pct(r.ofTask)}</td><td>${r.taskUsers ?? '–'}</td><td>${pct(r.e ? r.a / r.e : null)}</td><td>${fmtDay(r.f)}</td><td>${fmtDay(r.l)}</td></tr>`).join('')
     + '</tbody></table></div><p class="hint">태스크를 누르면 이 유저로 필터된 에피소드 목록이 열려요.</p>';
   box.querySelectorAll('th[data-k]').forEach(h => h.onclick = () => { if (usort.user === h.dataset.k) usort.dir = -usort.dir; else { usort.user = h.dataset.k; usort.dir = -1; } renderUser(split, op); });
   box.querySelectorAll('tr[data-t]').forEach(tr => tr.onclick = () => { location.hash = `#/${split}/${encodeURIComponent(tr.dataset.t)}?u=${encodeURIComponent(op)}`; });
-  drawDaily(u.daily);
+  drawDaily(u);
   msg('');
 }
 
-// Hours per UTC day (per week when the span is long), with a hover tooltip.
-function drawDaily(daily) {
+// Hours per UTC day (per week when the span is long), stacked by task: the user's 7 biggest tasks get fixed
+// colors (by the user's own task order, so a task keeps its color on every day), the rest is "other".
+const TASK_COLORS = 7;
+function drawDaily(u) {
   const el = $('u-daily'); if (!el) return;
-  const days = Object.keys(daily).sort(); if (!days.length) return;
+  const days = Object.keys(u.daily).sort(); if (!days.length) return;
   const t0 = Date.parse(days[0] + 'T00:00:00Z'), t1 = Date.parse(days.at(-1) + 'T00:00:00Z');
-  const weekly = (t1 - t0) / DAY > 150, step = weekly ? 7 * DAY : DAY;
-  const bins = new Map();
-  for (const d of days) { const t = Date.parse(d + 'T00:00:00Z'), k = t0 + Math.floor((t - t0) / step) * step; bins.set(k, (bins.get(k) || 0) + daily[d]); }
-  const n = Math.floor((t1 - t0) / step) + 1, W = el.clientWidth || 800, Hh = 160, pad = 28, bw = Math.max(1, (W - pad) / n);
-  const max = Math.max(...bins.values());
-  const y = v => Hh - 18 - (Hh - 26) * v / max;
-  let bars = '', labels = '';
-  for (let i = 0; i < n; i++) {
-    const k = t0 + i * step, v = bins.get(k) || 0;
-    if (v) bars += `<rect class="b" x="${pad + i * bw + (bw > 3 ? 1 : 0)}" y="${y(v)}" width="${Math.max(1, bw - (bw > 3 ? 2 : 0))}" height="${Hh - 18 - y(v)}" rx="${bw > 6 ? 2 : 0}" data-t="${k}" data-v="${v}"/>`;
+  const weekly = (t1 - t0) / DAY > 500, step = weekly ? 7 * DAY : DAY;
+  const bins = new Map();  // bin start -> Map(task index -> hours)
+  let multi = 0, ntasks = 0;
+  for (const d of days) {
+    const arr = u.daily[d], t = Date.parse(d + 'T00:00:00Z'), k = t0 + Math.floor((t - t0) / step) * step;
+    const m = bins.get(k) || new Map(); bins.set(k, m);
+    for (let i = 0; i < arr.length; i += 3) m.set(arr[i], (m.get(arr[i]) || 0) + arr[i + 1]);
+    ntasks += arr.length / 3; if (arr.length > 3) multi++;
   }
-  let lastM = '';
-  for (let i = 0; i < n; i++) {
-    const d = new Date(t0 + i * step), m = d.toISOString().slice(0, 7);
-    if (m !== lastM) { if (lastM || i === 0) labels += `<text class="axis" x="${pad + i * bw}" y="${Hh - 4}">${m}</text>`; lastM = m; }
+  const slot = i => i < TASK_COLORS ? i : TASK_COLORS;  // 7 = other
+  const n = Math.floor((t1 - t0) / step) + 1, W = el.clientWidth || 800, Hh = 170, pad = 30, bw = Math.max(1, (W - pad) / n);
+  const tot = m => [...m.values()].reduce((a, v) => a + v, 0);
+  const max = Math.max(...[...bins.values()].map(tot));
+  const sy = v => (Hh - 26) * v / max, base = Hh - 18;
+  let bars = '';
+  for (const [k, m] of bins) {
+    const i = Math.round((k - t0) / step), x = pad + i * bw + (bw > 3 ? 1 : 0), w = Math.max(1, bw - (bw > 3 ? 2 : 0));
+    const parts = new Map(); for (const [ti, h] of m) parts.set(slot(ti), (parts.get(slot(ti)) || 0) + h);
+    let y = base;
+    bars += `<g class="day" data-k="${k}">` + [...parts].sort((a, b) => a[0] - b[0]).map(([c, h]) => {
+      const hh = sy(h), gap = hh > 3 ? 1 : 0; y -= hh;
+      return `<rect class="s${c}" x="${x}" y="${y}" width="${w}" height="${Math.max(.5, hh - gap)}"/>`;
+    }).join('') + `<rect class="hit" x="${pad + i * bw}" y="0" width="${bw}" height="${base}"/></g>`;
   }
-  const grid = [0.5, 1].map(f => `<line class="grid-l" x1="${pad}" x2="${W}" y1="${y(max * f)}" y2="${y(max * f)}"/><text class="axis" x="0" y="${y(max * f) + 3}">${fmtH(max * f)}</text>`).join('');
+  let labels = '', lastM = '';
+  for (let i = 0; i < n; i++) {
+    const m = new Date(t0 + i * step).toISOString().slice(0, 7);
+    if (m !== lastM) { labels += `<text class="axis" x="${pad + i * bw}" y="${Hh - 4}">${m}</text>`; lastM = m; }
+  }
+  const grid = [0.5, 1].map(f => `<line class="grid-l" x1="${pad}" x2="${W}" y1="${base - sy(max * f)}" y2="${base - sy(max * f)}"/><text class="axis" x="0" y="${base - sy(max * f) + 3}">${fmtH(max * f)}</text>`).join('');
   el.innerHTML = `<svg viewBox="0 0 ${W} ${Hh}" preserveAspectRatio="none">${grid}${bars}${labels}</svg><div class="tip hidden"></div>`;
-  $('u-range').textContent = `${days.length}일 · ${weekly ? '주 단위' : '일 단위'}`;
+  $('u-range').textContent = `${days.length}일 · ${weekly ? '주 단위' : '일 단위'} · 여러 태스크 한 날 ${multi}일 (${pct(multi / days.length)}) · 하루 평균 ${(ntasks / days.length).toFixed(1)}개`;
+  const big = u.tn.slice(0, TASK_COLORS), other = u.tn.length - big.length;
+  $('u-legend').innerHTML = big.map((t, i) => `<span><i class="s${i}"></i>${esc(label(t))}</span>`).join('') + (other ? `<span><i class="s7"></i>기타 ${other}개 태스크</span>` : '');
   const tip = el.querySelector('.tip');
-  el.querySelectorAll('rect.b').forEach(r => {
-    r.onmouseenter = () => {
-      const t = +r.dataset.t, d = new Date(t).toISOString().slice(0, 10);
-      tip.innerHTML = `<b>${weekly ? d + ' 주' : d}</b> · ${fmtH(+r.dataset.v)}`;
+  el.querySelectorAll('g.day').forEach(g => {
+    g.onmouseenter = () => {
+      const k = +g.dataset.k, m = bins.get(k), d = new Date(k).toISOString().slice(0, 10);
+      const rows = [...m].sort((a, b) => b[1] - a[1]);
+      tip.innerHTML = `<b>${weekly ? d + ' 주' : d}</b> · ${fmtH(tot(m))} · 태스크 ${rows.length}개` + rows.slice(0, 8).map(([ti, h]) => `<br><i class="s${slot(ti)}"></i>${esc(label(u.tn[ti]))} ${fmtH(h)}`).join('') + (rows.length > 8 ? `<br>+${rows.length - 8}개` : '');
       tip.classList.remove('hidden');
-      const bx = r.getBoundingClientRect(), ex = el.getBoundingClientRect();
-      tip.style.left = Math.min(ex.width - 140, Math.max(0, bx.left - ex.left - 40)) + 'px'; tip.style.top = Math.max(0, bx.top - ex.top - 34) + 'px';
+      const bx = g.getBoundingClientRect(), ex = el.getBoundingClientRect();
+      tip.style.left = Math.max(0, Math.min(ex.width - tip.offsetWidth, bx.left - ex.left + bx.width + 8)) + 'px'; tip.style.top = '0px';
     };
-    r.onmouseleave = () => tip.classList.add('hidden');
+    g.onmouseleave = () => tip.classList.add('hidden');
+    g.onclick = () => { el.querySelectorAll('g.day.sel').forEach(x => x.classList.remove('sel')); g.classList.add('sel'); showDay(u, +g.dataset.k, step, days); };
+  });
+  const sel = dayPick.get(u) ?? days.at(-1);  // default: the last recording day
+  const k0 = t0 + Math.floor((Date.parse(sel + 'T00:00:00Z') - t0) / step) * step;
+  el.querySelector(`g.day[data-k="${k0}"]`)?.classList.add('sel');
+  showDay(u, k0, step, days);
+}
+
+// Tasks the user recorded on the clicked day (or week): episodes, hours; a row opens that task filtered to the user and day.
+const dayPick = new WeakMap();
+function showDay(u, k, step, days) {
+  const box = $('u-day'); if (!box) return;
+  const inBin = days.filter(d => { const t = Date.parse(d + 'T00:00:00Z'); return t >= k && t < k + step; });
+  dayPick.set(u, inBin[0]);
+  const per = new Map();
+  for (const d of inBin) { const a = u.daily[d]; for (let i = 0; i < a.length; i += 3) { const r = per.get(a[i]) || { h: 0, n: 0 }; r.h += a[i + 1]; r.n += a[i + 2]; per.set(a[i], r); } }
+  const rows = [...per].sort((a, b) => b[1].h - a[1].h), tot = rows.reduce((s, [, r]) => s + r.h, 0), totN = rows.reduce((s, [, r]) => s + r.n, 0);
+  const d0 = new Date(k).toISOString().slice(0, 10), d1 = new Date(k + step - DAY).toISOString().slice(0, 10);
+  const { split, op } = box.dataset;
+  box.innerHTML = `<h3>${step > DAY ? `${d0} – ${d1} (한 주)` : d0} <span class="muted">· ${fmtH(tot)} · ${fmt(totN)} ep · 태스크 ${rows.length}개${step > DAY ? ` · 녹화한 날 ${inBin.length}일` : ''}</span></h3>`
+    + `<div class="scroll"><table class="tbl"><tbody>${rows.map(([ti, r]) => `<tr data-t="${esc(u.tn[ti])}"><td class="l"><i class="sw s${ti < TASK_COLORS ? ti : TASK_COLORS}"></i></td><td class="l grow">${esc(label(u.tn[ti]))}</td><td>${fmt(r.n)} ep</td><td>${fmtH(r.h)}<span class="hbar"><i style="--w:${(100 * r.h / rows[0][1].h).toFixed(1)}%"></i></span></td><td>${pct(r.h / tot)}</td></tr>`).join('')}</tbody></table></div>`
+    + `<p class="hint">태스크를 누르면 이 유저 · 이 ${step > DAY ? '주' : '날'}로 필터된 에피소드가 열려요.</p>`;
+  box.querySelectorAll('tr[data-t]').forEach(tr => tr.onclick = () => {
+    location.hash = `#/${split}/${encodeURIComponent(tr.dataset.t)}?u=${encodeURIComponent(op)}&d=${d0}${step > DAY ? '&days=7' : ''}`;
   });
 }
 
@@ -774,7 +816,8 @@ async function route() {
     $('stats').classList.toggle('hidden', !!task);
     $('task').classList.toggle('hidden', !task);
     $('sort').classList.toggle('hidden', !!task || state.view === 'table');
-    if (task) { await renderTask(split, task, new URLSearchParams(query || '').get('u')); scrollTo(0, 0); }
+    const qp = new URLSearchParams(query || '');
+    if (task) { await renderTask(split, task, qp.get('u'), qp.get('d'), +qp.get('days') || 1); scrollTo(0, 0); }
     else { episodeView = null; renderTasks(data); countEpisodes(data); }
   } catch (e) {
     if (e instanceof AuthError) showGate(e.message); else msg(e.message);

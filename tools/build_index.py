@@ -267,21 +267,23 @@ def merge(args):
     with open(out / 'summary.json', 'w') as f: json.dump(summary, f, separators=(',', ':'))
     # Per-user stats across tasks: index/users.json
     #   { split: { operator: { e, h, a, days, f, l, t: { task: [episodes, hours, annotated, first, last] },
-    #                         daily: { "YYYY-MM-DD" (UTC): hours } } } }
+    #                         tn: [task names, most hours first],
+    #                         daily: { "YYYY-MM-DD" (UTC): [task index into tn, hours, episodes, task index, hours, episodes, ...] } } } }
     users = {}
     for (sp, task), eps in sorted(by_task.items()):
         for v in eps.values():
             if 'start' not in v or not v['operator']: continue
-            u = users.setdefault(sp, {}).setdefault(v['operator'], {'e': 0, 'h': 0.0, 'a': 0, 'f': v['start'], 'l': v['start'], 't': {}, 'daily': defaultdict(float)})
+            u = users.setdefault(sp, {}).setdefault(v['operator'], {'e': 0, 'h': 0.0, 'a': 0, 'f': v['start'], 'l': v['start'], 't': {}, 'daily': defaultdict(lambda: defaultdict(lambda: [0.0, 0]))})
             h = v['duration'] / 3600
             u['e'] += 1; u['h'] += h; u['a'] += v['annotated']; u['f'] = min(u['f'], v['start']); u['l'] = max(u['l'], v['start'])
             t = u['t'].setdefault(task, [0, 0.0, 0, v['start'], v['start']])
             t[0] += 1; t[1] += h; t[2] += v['annotated']; t[3] = min(t[3], v['start']); t[4] = max(t[4], v['start'])
-            u['daily'][time.strftime('%Y-%m-%d', time.gmtime(v['start'] / 1000))] += h
+            dt = u['daily'][time.strftime('%Y-%m-%d', time.gmtime(v['start'] / 1000))][task]; dt[0] += h; dt[1] += 1
     for sp in users.values():
         for u in sp.values():
             u['h'] = round(u['h'], 3); u['days'] = len(u['daily'])
-            u['daily'] = {d: round(x, 3) for d, x in sorted(u['daily'].items())}
+            u['tn'] = sorted(u['t'], key=lambda t: -u['t'][t][1]); ix = {t: i for i, t in enumerate(u['tn'])}
+            u['daily'] = {d: [y for t, x in sorted(tx.items(), key=lambda kv: ix[kv[0]]) for y in (ix[t], round(x[0], 3), x[1])] for d, tx in sorted(u['daily'].items())}
             for t in u['t'].values(): t[1] = round(t[1], 3)
     with open(out / 'users.json', 'w') as f: json.dump(users, f, separators=(',', ':'))
     for sp, us in users.items():
